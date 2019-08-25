@@ -16,8 +16,8 @@ namespace PRNet.NetworkEntities {
         public string definitionName;
         public bool staticEntity = false;
 
-        private Vector3 _position;
-        private Quaternion _rotation;
+        //private Vector3 _position;
+        //private Quaternion _rotation;
         private NetworkSpawnArgs _args;
 
         private Dictionary<string, RpcMeta> rpcDictionary = new Dictionary<string, RpcMeta>();
@@ -27,10 +27,16 @@ namespace PRNet.NetworkEntities {
         private List<Action<NetworkSpawnArgs>> initializationEvents = new List<Action<NetworkSpawnArgs>>();
         private List<Action<NetworkDestroyArgs>> destroyEvents = new List<Action<NetworkDestroyArgs>>();
 
+        private void Awake() {
+
+            //_position = transform.position;
+            //_rotation = transform.rotation;
+        }
+
         private void Update() {
 
-            _position = transform.position;
-            _rotation = transform.rotation;
+            //_position = transform.position;
+            //_rotation = transform.rotation;
 
             if (ServerStage.active) {
 
@@ -82,12 +88,12 @@ namespace PRNet.NetworkEntities {
 
         public NetworkSyncVector3 GetPositionSerializable() {
 
-            return new NetworkSyncVector3(_position);
+            return new NetworkSyncVector3(transform.position);
         }
 
         public NetworkSyncQuaternion GetRotationSerializable() {
 
-            return new NetworkSyncQuaternion(_rotation);
+            return new NetworkSyncQuaternion(transform.rotation);
         }
 
         public SpawnCommand GetSpawnRequest() {
@@ -96,7 +102,12 @@ namespace PRNet.NetworkEntities {
             List<NetworkSyncItem> varValues = GetSyncVarValues(varNames);
 
             NetworkSyncVarValue values = new NetworkSyncVarValue(varNames, varValues);
-            return new SpawnCommand(ownerId, instanceId, definitionName, _position, _rotation, values, _args);
+
+            SpawnCommand spawnCommand = new SpawnCommand(ownerId, instanceId, definitionName, transform.position, transform.rotation, values, _args);
+
+            Debug.Log("" + transform.position + " : " + spawnCommand.position.Value);
+
+            return spawnCommand;
         }
 
         private List<string> GetSyncVarNames() {

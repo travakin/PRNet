@@ -114,13 +114,15 @@ namespace PRNet.Requests {
             public NetworkSyncVector3 childRelayPosition;
             [SerializeAbleField(4)]
             public NetworkSyncQuaternion childRelayRotation;
+            [SerializeAbleField(5)]
+            public NetworkSyncVector3 relayVelocity;
 
             public UpdateTransformMessage() {
 
                 this.type = UpdateTransform;
             }
 
-            public UpdateTransformMessage(NetworkInstanceId id, Vector3 position, Quaternion rotation, Vector3 childPosition, Quaternion childRotation) {
+            public UpdateTransformMessage(NetworkInstanceId id, Vector3 position, Quaternion rotation, Vector3 childPosition, Quaternion childRotation, Vector3 velocity) {
 
                 this.type = UpdateTransform;
 
@@ -129,6 +131,7 @@ namespace PRNet.Requests {
                 relayRotation = rotation.GetSerializableVector();
                 childRelayPosition = childPosition.GetSerializableVector();
                 childRelayRotation = childRotation.GetSerializableVector();
+                relayVelocity = velocity.GetSerializableVector();
             }
         }
 

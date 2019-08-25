@@ -68,7 +68,7 @@ namespace PRNet.Core {
                 NetworkTransform netTransform = entity.GetComponent<NetworkTransform>();
 
                 if (netTransform != null) 
-                    netTransform.ReceiveTransformUpdate(transformMessage.relayPosition.Value, transformMessage.relayRotation.Value, transformMessage.childRelayPosition.Value, transformMessage.childRelayRotation.Value);
+                    netTransform.ReceiveTransformUpdate(transformMessage.relayPosition.Value, transformMessage.relayRotation.Value, transformMessage.childRelayPosition.Value, transformMessage.childRelayRotation.Value, transformMessage.relayVelocity.Value);
             }
         }
 
