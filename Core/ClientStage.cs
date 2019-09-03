@@ -15,7 +15,7 @@ namespace PRNet.Core {
         public static int clientId;
 
         public static int EVENT_CLIENTCONNECTED = 0;
-        public static int EVENT_CLIENTDISCONNECTED = 1;
+		public static int EVENT_CLIENTDISCONNECTED = 1;
 
         private static Dictionary<int, List<Action<NetworkEventPayload>>> networkEvents = new Dictionary<int, List<Action<NetworkEventPayload>>>() {
 
@@ -36,7 +36,8 @@ namespace PRNet.Core {
 
             Debug.Log("Connecting client");
 
-            clientObject = new PRClient(objectsManager, new NetworkMonitor());
+			PacketRecorder pr = new PacketRecorder(100, 300000);
+            clientObject = new PRClient(objectsManager, pr, pr, new NetworkMonitor());
             clientObject.RequestConnection(ip, port);
 
             RpcHandler.Initialize(RegisterMessageEvent);

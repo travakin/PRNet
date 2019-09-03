@@ -11,37 +11,40 @@ using PRNet.Exceptions;
 using PRNet.Packets;
 using PRNet.NetworkEntities;
 using PRNet.Utils;
+using PRNet.Core;
 
 namespace PRNet {
 
     public class PRNetCore{
 
+		private int nextPacketId = 1;
+
         protected UdpClient udpClient;
-        protected INetworkMonitor monitor;
+
+		protected IRecordSentPackets sentPacketRecorder;
+		protected IRecordReceivedPackets receivedPacketRecorder;
+		protected INetworkMonitor monitor;
 
         protected bool stopThreads = false;
 
-        protected void ServerParseAck(Packet packet, NetworkConnection conn) {
+		protected void StampPacket(Packet packet) {
 
-            PacketPriorityAck ackPacket = (PacketPriorityAck)packet;
+			packet.timeStamp = DateTime.Now;
 
-            HighPriorityMessageLog.HighPriorityServerCache cache;
+			if (packet.packetId == 0) {
 
-            if (HighPriorityMessageLog.highPriorityMessagesServer.ContainsKey(ackPacket.responseId))
-                HighPriorityMessageLog.highPriorityMessagesServer.TryRemove(ackPacket.responseId, out cache);
-        }
+				packet.packetId = nextPacketId;
+				nextPacketId++;
+			}
+		}
 
-        protected void ClientParseAck(Packet packet) {
+		protected void ParseAck(Packet packet)
+			=> receivedPacketRecorder.RecordReceivedPacket(packet);
 
-            PacketPriorityAck ackPacket = (PacketPriorityAck)packet;
+		protected void ParseAck(Packet packet, NetworkConnection conn) 
+			=> receivedPacketRecorder.RecordReceivedPacket(packet, conn);
 
-            Packet ackedPacket;
-
-            if (HighPriorityMessageLog.highPriorityMessagesClient.ContainsKey(ackPacket.responseId))
-                HighPriorityMessageLog.highPriorityMessagesClient.TryRemove(ackPacket.responseId, out ackedPacket);
-        }
-
-        protected Packet GetPacketFromSocket(UdpClient socket, ref IPEndPoint clientEndPoint, IAsyncResult result) {
+		protected Packet GetPacketFromSocket(UdpClient socket, ref IPEndPoint clientEndPoint, IAsyncResult result) {
 
             Byte[] receivedBytes = new Byte[0];
             Packet readPacket = null;

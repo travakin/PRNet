@@ -37,11 +37,13 @@ namespace PRNet.Core {
 
         private Dictionary<int, Action<Packet>> parsers = new Dictionary<int, Action<Packet>>();
 
-        public PRClient(NetworkObjectsManager manager, INetworkMonitor monitor) {
+		public PRClient(NetworkObjectsManager manager, IRecordSentPackets sentPacketRecorder, IRecordReceivedPackets receivedPacketRecorder, INetworkMonitor monitor) {
 
             Debug.Log("Created PRClient");
 
             this.objectsManager = manager;
+			this.sentPacketRecorder = sentPacketRecorder;
+			this.receivedPacketRecorder = receivedPacketRecorder;
             this.monitor = monitor;
 
             IPGlobalProperties properties = IPGlobalProperties.GetIPGlobalProperties();
@@ -64,7 +66,7 @@ namespace PRNet.Core {
             Debug.Log("Welcome to my client!");
             Debug.Log("You have been assigned port # " + myPort);
 
-            parsers.Add(Packet.PACKET_ACK, ClientParseAck);
+            parsers.Add(Packet.PACKET_ACK, ParseAck);
             parsers.Add(Packet.PACKET_CHALLENGEREQUEST, ParseChallengeRequestPacket);
             parsers.Add(Packet.PACKET_CONNECTIONCONFIRM, ParseConnectionConfirmPacket);
             parsers.Add(Packet.PACKET_SPAWNCOMMAND, ClientStage.ParseSpawnCommand);
@@ -127,49 +129,29 @@ namespace PRNet.Core {
 
             SendPacket(ackPacket);
 
-            if (HighPriorityMessageLog.highPriorityMessageRecords.ContainsKey(readPacket.packetId))
-                return;
+			if (receivedPacketRecorder.HasReceivedPacket(readPacket))
+				return;
 
-            HighPriorityRequestRecord record = new HighPriorityRequestRecord();
-            record.id = readPacket.packetId;
-            record.timeStamp = DateTime.Now;
-
-            HighPriorityMessageLog.highPriorityMessageRecords.TryAdd(readPacket.packetId, record);
+			receivedPacketRecorder.RecordReceivedPacket(readPacket);
         }
 
         private void ChangeDetectionThread() {
 
             while (!stopThreads) {
 
-                for (int i = 0; i < HighPriorityMessageLog.highPriorityMessagesClient.Keys.Count; i++) {
+				List<PacketConnection> expiredSentPackets = sentPacketRecorder.RetrieveExpiredSentPackets();
+
+                foreach (PacketConnection entry in expiredSentPackets) {
+
+					SendPacket(entry.packet);
                 }
 
-                foreach (KeyValuePair<int, Packet> entry in HighPriorityMessageLog.highPriorityMessagesClient) {
-
-                    Packet currentPacket = entry.Value;
-
-                    if ((DateTime.Now - currentPacket.timeStamp).Milliseconds >= HIGH_PRIORITY_WAIT_MS) {
-
-                        currentPacket.timeStamp = DateTime.Now;
-                        SendPacket(currentPacket);
-                    }
-                }
-
-                for (int i = HighPriorityMessageLog.highPriorityMessageRecords.Keys.Count - 1; i >= 0; i--) {
-
-                    int currentRecordKey = HighPriorityMessageLog.highPriorityMessageRecords.Keys.ElementAt(i);
-                    HighPriorityRequestRecord currentRecord = HighPriorityMessageLog.highPriorityMessageRecords[currentRecordKey];
-
-                    HighPriorityRequestRecord deleteRecord;
-
-                    if ((DateTime.Now - HighPriorityMessageLog.highPriorityMessageRecords[currentRecordKey].timeStamp).Seconds >= HIGH_PRIORITY_RECORD_LIFESPAN)
-                        HighPriorityMessageLog.highPriorityMessageRecords.TryRemove(currentRecordKey, out deleteRecord);
-                }
+				receivedPacketRecorder.ClearExpiredReceivedPacketRecords();
 
                 if ((DateTime.Now - lastPacketCountTime).TotalSeconds > 1) {
 
-                    Debug.Log("Current inbound packets: " + monitor.GetPacketsInbound() + " packets for a total of " + monitor.GetBytesInbound() + " bytes");
-                    Debug.Log("Current outbound packets: " + monitor.GetPacketsOutbound() + " packets for a total of " + monitor.GetBytesOutbound() + " bytes");
+                    //Debug.Log("Current inbound packets: " + monitor.GetPacketsInbound() + " packets for a total of " + monitor.GetBytesInbound() + " bytes");
+                    //Debug.Log("Current outbound packets: " + monitor.GetPacketsOutbound() + " packets for a total of " + monitor.GetBytesOutbound() + " bytes");
 
                     monitor.ClearData();
                     lastPacketCountTime = DateTime.Now;
@@ -281,12 +263,12 @@ namespace PRNet.Core {
 
         private async void SendPacket(Packet packet) {
 
-            packet.timeStamp = DateTime.Now;
+			StampPacket(packet);
 
-            if (packet.priority == Packet.PRIORITY_HIGH && !HighPriorityMessageLog.highPriorityMessagesClient.ContainsKey(packet.packetId)) {
+			if (packet.priority == Packet.PRIORITY_HIGH) {
 
-                ArchivePacket(packet);
-            }
+				sentPacketRecorder.RecordSentPacket(packet);
+			}
 
             byte[] sendData = Converters.SerializePacket(packet);
 
@@ -298,14 +280,6 @@ namespace PRNet.Core {
             }
             catch (SocketException se) {
             }
-        }
-
-        private void ArchivePacket(Packet packet) {
-
-            var idList = HighPriorityMessageLog.highPriorityMessagesClient.Values.Select(msg => msg.packetId).ToList();
-            packet.packetId = Identification.GetUniqueIdentifierFromList(idList);
-
-            HighPriorityMessageLog.highPriorityMessagesClient.TryAdd(packet.packetId, packet);
         }
     }
 }

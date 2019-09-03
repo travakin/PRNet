@@ -35,7 +35,8 @@ namespace PRNet.Core {
 
         public static void StartServer(int port) {
 
-            serverObject = new PRServer(port, objectsManager, new NetworkMonitor());
+			PacketRecorder pr = new PacketRecorder(100, 300000);
+            serverObject = new PRServer(port, objectsManager, pr, pr, new NetworkMonitor());
 
             RpcHandler.Initialize(RegisterMessageEvent);
             RpcHandler.ObjectRegistryCallback callback = FindNetworkEntityWithId;

@@ -25,19 +25,20 @@ namespace PRNet.Core {
         private const int HIGH_PRIORITY_WAIT_MS = 200;
 
         private NetworkObjectsManager objectsManager;
-        private NetworkConnection[] clientConnections = new NetworkConnection[MAX_CONNECTIONS];
+
+		private NetworkConnection[] clientConnections = new NetworkConnection[MAX_CONNECTIONS];
         private List<NetworkConnection> pendingConnections = new List<NetworkConnection>();
         private Action<Packet, NetworkConnection> invokePacketParsers;
-
-        private int nextPacketId = 1;
 
         private DateTime lastPacketCountTime = DateTime.Now;
 
         private Dictionary<int, Action<Packet, NetworkConnection>> parsers = new Dictionary<int, Action<Packet, NetworkConnection>>();
 
-        public PRServer(int port, NetworkObjectsManager manager, NetworkMonitor monitor) {
+        public PRServer(int port, NetworkObjectsManager manager, IRecordSentPackets sentPacketRecorder, IRecordReceivedPackets receivedPacketRecorder, INetworkMonitor monitor) {
 
             this.objectsManager = manager;
+			this.sentPacketRecorder = sentPacketRecorder;
+			this.receivedPacketRecorder = receivedPacketRecorder;
             this.monitor = monitor;
 
             udpClient = new UdpClient(47777);
@@ -53,7 +54,7 @@ namespace PRNet.Core {
             parsers.Add(Packet.PACKET_CONNECTIONREQUEST, ParseConnectionRequestPacket);
             parsers.Add(Packet.PACKET_CHALLENGERESPONSE, ParseChallengeResponsePacket);
             parsers.Add(Packet.PACKET_CLIENTREADY, ParseClientReadyPacket);
-            parsers.Add(Packet.PACKET_ACK, ServerParseAck);
+            parsers.Add(Packet.PACKET_ACK, ParseAck);
             parsers.Add(Packet.PACKET_STATEREQUEST, ParseStateRequestPacket);
             parsers.Add(Packet.PACKET_NETWORKMESSAGE, ServerStage.ParseNetworkMessages);
             parsers.Add(Packet.PACKET_CLIENTDISCONNECTED, ParseClientDisconnectPacket);
@@ -100,14 +101,10 @@ namespace PRNet.Core {
 
             SendPacket(ackPacket, newConnection);
 
-            if (HighPriorityMessageLog.highPriorityMessageRecords.ContainsKey(readPacket.packetId))
-                return;
+			if (receivedPacketRecorder.HasReceivedPacket(readPacket, newConnection))
+				return;
 
-            HighPriorityRequestRecord record = new HighPriorityRequestRecord();
-            record.id = readPacket.packetId;
-            record.timeStamp = DateTime.Now;
-
-            HighPriorityMessageLog.highPriorityMessageRecords.TryAdd(readPacket.packetId, record);
+			receivedPacketRecorder.RecordReceivedPacket(readPacket, newConnection);
         }
 
         private void ChangeDetectionThread() {
@@ -137,47 +134,31 @@ namespace PRNet.Core {
                     objectsManager.pendingMessagesOutboundTargeted.Remove(clientConnections[i]);
                     objectsManager.pendingMessagesOutboundTargetedHP.Remove(clientConnections[i]);
                     clientConnections[i] = null;
+
+					sentPacketRecorder.ClearPacketsForConnection(clientConnections[i]);
                 }
             }
         }
 
         private void ResendHighPriorityPackets() {
 
-            foreach (KeyValuePair<int, HighPriorityMessageLog.HighPriorityServerCache> entry in HighPriorityMessageLog.highPriorityMessagesServer) {
+			List <PacketConnection> expiredPackets = sentPacketRecorder.RetrieveExpiredSentPackets();
 
-                HighPriorityMessageLog.HighPriorityServerCache currentCache = entry.Value;
+            foreach (PacketConnection record in expiredPackets) {
 
-                if ((DateTime.Now - currentCache.payload.timeStamp).Milliseconds >= HIGH_PRIORITY_WAIT_MS) {
-
-                    currentCache.payload.timeStamp = DateTime.Now;
-
-                    if (currentCache.conn != null)
-                        SendPacket(currentCache.payload, currentCache.conn);
-                    else
-                        SendPacket(currentCache.payload);
-                }
+				SendPacket(record.packet, record.conn);
             }
         }
 
-        private void DeleteExpiredHighPriorityRecords() {
-
-            for (int i = HighPriorityMessageLog.highPriorityMessageRecords.Keys.Count - 1; i >= 0; i--) {
-
-                int currentRecordKey = HighPriorityMessageLog.highPriorityMessageRecords.Keys.ElementAt(i);
-                HighPriorityRequestRecord currentRecord = HighPriorityMessageLog.highPriorityMessageRecords[currentRecordKey];
-                HighPriorityRequestRecord deleteRecord;
-
-                if ((DateTime.Now - HighPriorityMessageLog.highPriorityMessageRecords[currentRecordKey].timeStamp).Seconds >= HIGH_PRIORITY_RECORD_LIFESPAN)
-                    HighPriorityMessageLog.highPriorityMessageRecords.TryRemove(currentRecordKey, out deleteRecord);
-            }
-        }
+        private void DeleteExpiredHighPriorityRecords() 
+			=> receivedPacketRecorder.ClearExpiredReceivedPacketRecords();
 
         private void DisplayData() {
 
             if ((DateTime.Now - lastPacketCountTime).TotalSeconds > 1) {
 
-                Debug.Log("Current inbound packets: " + monitor.GetPacketsInbound() + " packets for a total of " + monitor.GetBytesInbound() + " bytes");
-                Debug.Log("Current outbound packets: " + monitor.GetPacketsOutbound() + " packets for a total of " + monitor.GetBytesOutbound() + " bytes");
+                //Debug.Log("Current inbound packets: " + monitor.GetPacketsInbound() + " packets for a total of " + monitor.GetBytesInbound() + " bytes");
+                //Debug.Log("Current outbound packets: " + monitor.GetPacketsOutbound() + " packets for a total of " + monitor.GetBytesOutbound() + " bytes");
 
                 monitor.ClearData();
                 lastPacketCountTime = DateTime.Now;
@@ -425,9 +406,9 @@ namespace PRNet.Core {
 
         public async void SendPacket(Packet packet, NetworkConnection connection) {
 
-            packet.timeStamp = DateTime.Now;
-
+			StampPacket(packet);
             CachePacket(packet, connection);
+
             byte[] sendData = Converters.SerializePacket(packet);
 
             if (sendData.Length > 1500) {
@@ -435,13 +416,9 @@ namespace PRNet.Core {
 
             try {
 
-                Debug.Log("Sending packet");
-
                 monitor.AddPacketsOutbound(1);
                 monitor.AddBytesOutbound(sendData.Length);
                 await udpClient.SendAsync(sendData, sendData.Length, connection.endPoint);
-
-                Debug.Log("Done sending packet");
             }
             catch (SocketException se) {
 
@@ -453,16 +430,9 @@ namespace PRNet.Core {
 
         private void CachePacket(Packet packet, NetworkConnection connection) {
 
-            if (packet.priority == Packet.PRIORITY_HIGH && !HighPriorityMessageLog.highPriorityMessagesServer.ContainsKey(packet.packetId)) {
+            if (packet.priority == Packet.PRIORITY_HIGH) {
 
-                packet.packetId = nextPacketId;
-                nextPacketId = (nextPacketId + 1) % (int.MaxValue - 1);
-
-                HighPriorityMessageLog.HighPriorityServerCache newEntry = new HighPriorityMessageLog.HighPriorityServerCache();
-                newEntry.conn = connection;
-                newEntry.payload = packet;
-
-                HighPriorityMessageLog.highPriorityMessagesServer.TryAdd(packet.packetId, newEntry);
+				sentPacketRecorder.RecordSentPacket(packet, connection);
             }
         }
 
