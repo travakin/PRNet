@@ -132,16 +132,7 @@ namespace PRNet.Core {
 		public static void ClientInitializationUpdate(NetworkConnection conn) {
 
 
-			List<SpawnCommand> spawnCommands = null;
-
-			try {
-				spawnCommands = objectsManager.spawnedEntities.Values.Where(entity => !entity.staticEntity).Select(entity => entity.GetSpawnRequest()).ToList();
-			}
-			catch (Exception e) {
-
-				Debug.LogError(e.Message + ": " + e.InnerException);
-				return;
-			}
+			List<SpawnCommand> spawnCommands = objectsManager.spawnedEntities.Values.Where(entity => !entity.staticEntity).Select(entity => entity.GetSpawnRequest()).ToList();
 
 			foreach (SpawnCommand spawnCommand in spawnCommands) {
 
