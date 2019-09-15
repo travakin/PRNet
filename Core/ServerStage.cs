@@ -10,339 +10,349 @@ using PRNet.Utils;
 using UnityEngine;
 
 namespace PRNet.Core {
-    static class ServerStage {
+	static class ServerStage {
 
-        public static bool active = false;
+		public static bool active = false;
 
-        public static int EVENT_CLIENTCONNECTED = 0;
-        public static int EVENT_CLIENTREADY = 1;
-        public static int EVENT_CLIENTDISCONNECTED = 2;
+		public static int EVENT_CLIENTCONNECTED = 0;
+		public static int EVENT_CLIENTREADY = 1;
+		public static int EVENT_CLIENTDISCONNECTED = 2;
 
-        private static Dictionary<int, List<Action<NetworkConnection, NetworkEventPayload>>> networkEvents = new Dictionary<int, List<Action<NetworkConnection, NetworkEventPayload>>>() {
+		private static Dictionary<int, List<Action<NetworkConnection, NetworkEventPayload>>> networkEvents = new Dictionary<int, List<Action<NetworkConnection, NetworkEventPayload>>>() {
 
-            { EVENT_CLIENTCONNECTED, new List<Action<NetworkConnection, NetworkEventPayload>>() },
-            { EVENT_CLIENTREADY, new List<Action<NetworkConnection, NetworkEventPayload>>() },
-            { EVENT_CLIENTDISCONNECTED, new List<Action<NetworkConnection, NetworkEventPayload>>() }
-        };
+			{ EVENT_CLIENTCONNECTED, new List<Action<NetworkConnection, NetworkEventPayload>>() },
+			{ EVENT_CLIENTREADY, new List<Action<NetworkConnection, NetworkEventPayload>>() },
+			{ EVENT_CLIENTDISCONNECTED, new List<Action<NetworkConnection, NetworkEventPayload>>() }
+		};
 
-        private static List<SpawnCommand> pendingSpawnCommands = new List<SpawnCommand>();
-        private static List<DestroyCommand> pendingDestroyCommands = new List<DestroyCommand>();
+		private static List<SpawnCommand> pendingSpawnCommands = new List<SpawnCommand>();
+		private static List<DestroyCommand> pendingDestroyCommands = new List<DestroyCommand>();
 
-        private static NetworkObjectsManager objectsManager = new NetworkObjectsManager(ServerDestroyNoTracking);
-        private static Queue<NetworkEventItem> networkEventItems = new Queue<NetworkEventItem>();
+		private static NetworkObjectsManager objectsManager = new NetworkObjectsManager(ServerDestroyNoTracking);
+		private static Queue<NetworkEventItem> networkEventItems = new Queue<NetworkEventItem>();
 
-        private static PRServer serverObject;
+		private static PRServer serverObject;
 
-        public static void StartServer(int port) {
+		public static void StartServer(int port) {
 
 			PacketRecorder pr = new PacketRecorder(100, 300000);
-            serverObject = new PRServer(port, objectsManager, pr, pr, new NetworkMonitor());
+			serverObject = new PRServer(port, objectsManager, pr, pr, new NetworkMonitor());
 
-            RpcHandler.Initialize(RegisterMessageEvent);
-            RpcHandler.ObjectRegistryCallback callback = FindNetworkEntityWithId;
-            RpcHandler.SetObjectRegistryCallback(callback);
+			RpcHandler.Initialize(RegisterMessageEvent);
+			RpcHandler.ObjectRegistryCallback callback = FindNetworkEntityWithId;
+			RpcHandler.SetObjectRegistryCallback(callback);
 
-            active = true;
-        }
+			active = true;
+		}
 
-        public static void ResetServer() {
+		public static void ResetServer() {
 
-            Debug.Log("Resetting server");
-            objectsManager.ResetServer();
-        }
+			Debug.Log("Resetting server");
+			objectsManager.ResetServer();
+		}
 
-        public static void Disconnect() {
+		public static void Disconnect() {
 
-            serverObject.Stop();
-        }
+			serverObject.Stop();
+		}
 
-        public static void AddEntityDefinitions(EntityDictionaryEntry[] definitions) {
+		public static void AddEntityDefinitions(EntityDictionaryEntry[] definitions) {
 
-            objectsManager.entityDefinitions = definitions;
-        }
+			objectsManager.entityDefinitions = definitions;
+		}
 
-        public static void Ready() {
+		public static void Ready() {
 
-            NetworkEntity[] staticEntities = GameObject.FindObjectsOfType<NetworkEntity>().Where(entity => entity.staticEntity).ToArray();
+			NetworkEntity[] staticEntities = GameObject.FindObjectsOfType<NetworkEntity>().Where(entity => entity.staticEntity).ToArray();
 
-            foreach (NetworkEntity staticEntity in staticEntities) {
+			foreach (NetworkEntity staticEntity in staticEntities) {
 
-                if (objectsManager.spawnedEntities.Values.Contains(staticEntity))
-                    return;
+				if (objectsManager.spawnedEntities.Values.Contains(staticEntity))
+					return;
 
-                Debug.Log("Received valid network entity registration request");
+				Debug.Log("Received valid network entity registration request");
 
-                Transform et = staticEntity.transform;
-                staticEntity.instanceId = new NetworkInstanceId((int)(et.position.x * 100) + (int)(et.position.y * 10) + (int)(et.position.z));
-                staticEntity.Ready();
+				Transform et = staticEntity.transform;
+				staticEntity.instanceId = new NetworkInstanceId((int)(et.position.x * 100) + (int)(et.position.y * 10) + (int)(et.position.z));
+				staticEntity.Ready();
 
-                objectsManager.spawnedEntities.Add(staticEntity.instanceId, staticEntity);
-            }
-        }
+				objectsManager.spawnedEntities.Add(staticEntity.instanceId, staticEntity);
+			}
+		}
 
-        public static void ServerSpawn(NetworkEntity toSpawn, NetworkSpawnArgs args) {
+		public static void ServerSpawn(NetworkEntity toSpawn, NetworkSpawnArgs args) {
 
-            Debug.Log("Spawning object with no ownership");
+			Debug.Log("Spawning object with no ownership");
 
-            List<int> currentIds = objectsManager.spawnedEntities.Keys.Select(key => key.id).ToList();
-            NetworkInstanceId id = new NetworkInstanceId(Identification.GetUniqueIdentifierFromList(currentIds));
-            toSpawn.Initialize(-1, id, toSpawn.definitionName, args);
+			List<int> currentIds = objectsManager.spawnedEntities.Keys.Select(key => key.id).ToList();
+			NetworkInstanceId id = new NetworkInstanceId(Identification.GetUniqueIdentifierFromList(currentIds));
+			toSpawn.Initialize(-1, id, toSpawn.definitionName, args);
 
-            objectsManager.spawnedEntities.Add(id, toSpawn);
+			objectsManager.spawnedEntities.Add(id, toSpawn);
 
-            SpawnCommand spawnCommand = toSpawn.GetSpawnRequest();
+			SpawnCommand spawnCommand = toSpawn.GetSpawnRequest();
 
-            pendingSpawnCommands.Add(spawnCommand);
-        }
+			pendingSpawnCommands.Add(spawnCommand);
+		}
 
-        public static void ServerSpawn(NetworkEntity toSpawn, NetworkConnection clientConnection, NetworkSpawnArgs args) {
+		public static void ServerSpawn(NetworkEntity toSpawn, NetworkConnection clientConnection, NetworkSpawnArgs args) {
 
-            Debug.Log("Spawning object with ownership");
+			Debug.Log("Spawning object with ownership");
 
-            List<int> currentIds = objectsManager.spawnedEntities.Keys.Select(key => key.id).ToList();
-            NetworkInstanceId id = new NetworkInstanceId(Identification.GetUniqueIdentifierFromList(currentIds));
-            toSpawn.Initialize(clientConnection.clientId, id, toSpawn.definitionName, clientConnection, args);
+			List<int> currentIds = objectsManager.spawnedEntities.Keys.Select(key => key.id).ToList();
+			NetworkInstanceId id = new NetworkInstanceId(Identification.GetUniqueIdentifierFromList(currentIds));
+			toSpawn.Initialize(clientConnection.clientId, id, toSpawn.definitionName, clientConnection, args);
 
-            objectsManager.spawnedEntities.Add(id, toSpawn);
+			objectsManager.spawnedEntities.Add(id, toSpawn);
 
-            SpawnCommand spawnCommand = toSpawn.GetSpawnRequest();
+			SpawnCommand spawnCommand = toSpawn.GetSpawnRequest();
 
-            pendingSpawnCommands.Add(spawnCommand);
-        }
+			pendingSpawnCommands.Add(spawnCommand);
+		}
 
-        public static void ServerDestroy(NetworkEntity toDestroy, NetworkDestroyArgs args) {
+		public static void ServerDestroy(NetworkEntity toDestroy, NetworkDestroyArgs args) {
 
-            DestroyCommand destroy = new DestroyCommand(toDestroy.instanceId, args);
+			DestroyCommand destroy = new DestroyCommand(toDestroy.instanceId, args);
 
-            objectsManager.spawnedEntities.Remove(toDestroy.instanceId);
-            GameObject.Destroy(toDestroy.gameObject);
+			objectsManager.spawnedEntities.Remove(toDestroy.instanceId);
+			GameObject.Destroy(toDestroy.gameObject);
 
-            pendingDestroyCommands.Add(destroy);
-        }
+			pendingDestroyCommands.Add(destroy);
+		}
 
-        private static void ServerDestroyNoTracking(NetworkEntity toDestroy, NetworkDestroyArgs args) {
+		private static void ServerDestroyNoTracking(NetworkEntity toDestroy, NetworkDestroyArgs args) {
 
-            DestroyCommand destroy = new DestroyCommand(toDestroy.instanceId, args);
+			DestroyCommand destroy = new DestroyCommand(toDestroy.instanceId, args);
 
-            GameObject.Destroy(toDestroy.gameObject);
+			GameObject.Destroy(toDestroy.gameObject);
 
-            pendingDestroyCommands.Add(destroy);
-        }
+			pendingDestroyCommands.Add(destroy);
+		}
 
-        public static void ClientInitializationUpdate(NetworkConnection conn) {
+		public static void ClientInitializationUpdate(NetworkConnection conn) {
 
-            List<SpawnCommand> spawnCommands = objectsManager.spawnedEntities.Values.Where(entity => !entity.staticEntity).Select(entity => entity.GetSpawnRequest()).ToList();
 
-            foreach (SpawnCommand spawnCommand in spawnCommands) {
+			List<SpawnCommand> spawnCommands = null;
 
-                PacketSpawnCommand command = new PacketSpawnCommand(spawnCommand);
+			try {
+				spawnCommands = objectsManager.spawnedEntities.Values.Where(entity => !entity.staticEntity).Select(entity => entity.GetSpawnRequest()).ToList();
+			}
+			catch (Exception e) {
 
-                serverObject.SendClientUpdates(command, conn);
-            }
+				Debug.LogError(e.Message + ": " + e.InnerException);
+				return;
+			}
 
-            foreach (NetworkEntity entity in objectsManager.spawnedEntities.Values) {
+			foreach (SpawnCommand spawnCommand in spawnCommands) {
 
-                entity.Ready();
-            }
-        }
+				PacketSpawnCommand command = new PacketSpawnCommand(spawnCommand);
 
-        public static void ParseStateRequestPacket(Packet request, NetworkConnection clientConnection) {
+				serverObject.SendClientUpdates(command, conn);
+			}
 
-        }
+			foreach (NetworkEntity entity in objectsManager.spawnedEntities.Values) {
 
-        public static void Tick() {
+				entity.Ready();
+			}
+		}
 
-            HandleNetworkMessages();
-            HandleNetworkEvents();
+		public static void ParseStateRequestPacket(Packet request, NetworkConnection clientConnection) {
 
+		}
 
-            if (pendingSpawnCommands.Count > 0)
-                SendSpawnCommands();
+		public static void Tick() {
 
-            if (pendingDestroyCommands.Count > 0)
-                SendDestroyCommands();
+			HandleNetworkMessages();
+			HandleNetworkEvents();
 
-            serverObject.SendNetworkMessages();
-        }
 
-        private static void HandleNetworkMessages() {
+			if (pendingSpawnCommands.Count > 0)
+				SendSpawnCommands();
 
-            if (objectsManager.pendingMessagesInbound.Count == 0)
-                return;
+			if (pendingDestroyCommands.Count > 0)
+				SendDestroyCommands();
 
-            while (objectsManager.pendingMessagesInbound.Count > 0) {
+			serverObject.SendNetworkMessages();
+		}
 
-                NetworkMessage currentMessage = objectsManager.pendingMessagesInbound.Pop();
+		private static void HandleNetworkMessages() {
 
-                if (currentMessage == null)
-                    continue;
+			if (objectsManager.pendingMessagesInbound.Count == 0)
+				return;
 
-                if (objectsManager.messageEvents.ContainsKey(currentMessage.type)) {
+			while (objectsManager.pendingMessagesInbound.Count > 0) {
 
-                    foreach (var msgEvent in objectsManager.messageEvents[currentMessage.type]) {
+				NetworkMessage currentMessage = objectsManager.pendingMessagesInbound.Pop();
 
-                        try {
+				if (currentMessage == null)
+					continue;
 
-                            msgEvent(currentMessage);
-                        }
-                        catch (Exception e) {
-                        }
-                    }   
-                }
-                else {
+				if (objectsManager.messageEvents.ContainsKey(currentMessage.type)) {
 
-                    Debug.Log("Received network message with no available handler events.");
-                }
-            }
-        }
+					foreach (var msgEvent in objectsManager.messageEvents[currentMessage.type]) {
 
-        private static void HandleNetworkEvents() {
+						try {
 
-            while (networkEventItems.Count > 0) {
+							msgEvent(currentMessage);
+						}
+						catch (Exception e) {
+						}
+					}
+				}
+				else {
 
-                NetworkEventItem item = networkEventItems.Dequeue();
-                if (item == null)
-                    continue;
+					Debug.Log("Received network message with no available handler events.");
+				}
+			}
+		}
 
-                foreach (Action<NetworkConnection, NetworkEventPayload> evt in networkEvents[item.type]) {
+		private static void HandleNetworkEvents() {
 
-                    try {
+			while (networkEventItems.Count > 0) {
 
-                        evt(item.conn, item.payload);
-                    }
-                    catch (Exception e) {
+				NetworkEventItem item = networkEventItems.Dequeue();
+				if (item == null)
+					continue;
 
-                    }
-                }
-            }
-        }
+				foreach (Action<NetworkConnection, NetworkEventPayload> evt in networkEvents[item.type]) {
 
-        private static void SendSpawnCommands() {
+					try {
 
-            List<SpawnCommand> spawnCommands = new List<SpawnCommand>();
-            spawnCommands.AddRange(pendingSpawnCommands);
-            pendingSpawnCommands.RemoveRange(0, pendingSpawnCommands.Count);
+						evt(item.conn, item.payload);
+					}
+					catch (Exception e) {
 
-            foreach (SpawnCommand spawnCommand in spawnCommands) {
+					}
+				}
+			}
+		}
 
-                PacketSpawnCommand command = new PacketSpawnCommand();
-                command.spawnCommand = spawnCommand;
+		private static void SendSpawnCommands() {
 
-                serverObject.SendClientUpdates(command);
-            }
-        }
+			List<SpawnCommand> spawnCommands = new List<SpawnCommand>();
+			spawnCommands.AddRange(pendingSpawnCommands);
+			pendingSpawnCommands.RemoveRange(0, pendingSpawnCommands.Count);
 
-        private static void SendDestroyCommands() {
+			foreach (SpawnCommand spawnCommand in spawnCommands) {
 
-            List<DestroyCommand> destroyCommands = new List<DestroyCommand>();
-            destroyCommands.AddRange(pendingDestroyCommands);
-            pendingDestroyCommands.RemoveRange(0, pendingDestroyCommands.Count);
+				PacketSpawnCommand command = new PacketSpawnCommand();
+				command.spawnCommand = spawnCommand;
 
-            foreach (DestroyCommand destroyCommand in destroyCommands) {
+				serverObject.SendClientUpdates(command);
+			}
+		}
 
-                PacketDestroyCommand command = new PacketDestroyCommand();
-                command.destroyCommand = destroyCommand;
+		private static void SendDestroyCommands() {
 
-                serverObject.SendClientUpdates(command);
-            }
-        }
+			List<DestroyCommand> destroyCommands = new List<DestroyCommand>();
+			destroyCommands.AddRange(pendingDestroyCommands);
+			pendingDestroyCommands.RemoveRange(0, pendingDestroyCommands.Count);
 
-        public static void RegisterMessageEvent(int eventKey, Action<NetworkMessage> messageEvent) {
+			foreach (DestroyCommand destroyCommand in destroyCommands) {
 
-            if (!objectsManager.messageEvents.ContainsKey(eventKey))
-                objectsManager.messageEvents.Add(eventKey, new List<Action<NetworkMessage>>());
+				PacketDestroyCommand command = new PacketDestroyCommand();
+				command.destroyCommand = destroyCommand;
 
-            objectsManager.messageEvents[eventKey].Add(messageEvent);
-        }
+				serverObject.SendClientUpdates(command);
+			}
+		}
 
-        public static void UnRegisterMessageEvent(int eventKey, Action<NetworkMessage> messageEvent) {
+		public static void RegisterMessageEvent(int eventKey, Action<NetworkMessage> messageEvent) {
 
-            int first = objectsManager.messageEvents[eventKey].Count;
-            objectsManager.messageEvents[eventKey].Remove(messageEvent);
-            int second = objectsManager.messageEvents[eventKey].Count;
+			if (!objectsManager.messageEvents.ContainsKey(eventKey))
+				objectsManager.messageEvents.Add(eventKey, new List<Action<NetworkMessage>>());
 
-            if (first == second)
-                Debug.LogError("Failed to unregister event.");
-            else
-                Debug.Log("Successfully unregistered event.");
-        }
+			objectsManager.messageEvents[eventKey].Add(messageEvent);
+		}
 
-        public static void SubscribeNetworkEvent(int type, Action<NetworkConnection, NetworkEventPayload> evt) {
+		public static void UnRegisterMessageEvent(int eventKey, Action<NetworkMessage> messageEvent) {
 
-            networkEvents[type].Add(evt);
-        }
+			int first = objectsManager.messageEvents[eventKey].Count;
+			objectsManager.messageEvents[eventKey].Remove(messageEvent);
+			int second = objectsManager.messageEvents[eventKey].Count;
 
-        public static void EnqueueNetworkEvent(int type, NetworkConnection conn, NetworkEventPayload payload) {
+			if (first == second)
+				Debug.LogError("Failed to unregister event.");
+			else
+				Debug.Log("Successfully unregistered event.");
+		}
 
-            NetworkEventItem newItems = new NetworkEventItem();
-            newItems.type = type;
-            newItems.conn = conn;
-            newItems.payload = payload;
+		public static void SubscribeNetworkEvent(int type, Action<NetworkConnection, NetworkEventPayload> evt) {
 
-            networkEventItems.Enqueue(newItems);
-        }
+			networkEvents[type].Add(evt);
+		}
 
-        public static void ParseNetworkMessages(Packet packet, NetworkConnection clientConnection) {
+		public static void EnqueueNetworkEvent(int type, NetworkConnection conn, NetworkEventPayload payload) {
 
-            PacketNetworkMessage messagePacket = (PacketNetworkMessage)packet;
+			NetworkEventItem newItems = new NetworkEventItem();
+			newItems.type = type;
+			newItems.conn = conn;
+			newItems.payload = payload;
 
-            foreach (var message in messagePacket.networkMessages) {
+			networkEventItems.Enqueue(newItems);
+		}
 
-                message.senderConnection = clientConnection;
-                objectsManager.pendingMessagesInbound.Push(message);
-            }
-        }
+		public static void ParseNetworkMessages(Packet packet, NetworkConnection clientConnection) {
 
-        public static void SendNetworkMessage(NetworkMessage msg) {
+			PacketNetworkMessage messagePacket = (PacketNetworkMessage)packet;
 
-            objectsManager.pendingMessagesOutbound.Add(msg);
-        }
+			foreach (var message in messagePacket.networkMessages) {
 
-        public static void SendNetworkMessage(NetworkMessage msg, NetworkConnection conn) {
+				message.senderConnection = clientConnection;
+				objectsManager.pendingMessagesInbound.Push(message);
+			}
+		}
 
-            msg.senderConnection = conn;
-            objectsManager.pendingMessagesOutboundTargeted[conn].Add(msg);
-        }
+		public static void SendNetworkMessage(NetworkMessage msg) {
 
-        public static void SendHighPriorityNetworkMessage(NetworkMessage msg) {
+			objectsManager.pendingMessagesOutbound.Add(msg);
+		}
 
-            objectsManager.pendingMessagesOutboundHP.Add(msg);
-        }
+		public static void SendNetworkMessage(NetworkMessage msg, NetworkConnection conn) {
 
-        public static void SendHighPriorityNetworkMessage(NetworkMessage msg, NetworkConnection conn) {
+			msg.senderConnection = conn;
+			objectsManager.pendingMessagesOutboundTargeted[conn].Add(msg);
+		}
 
-            msg.senderConnection = conn;
-            objectsManager.pendingMessagesOutboundTargetedHP[conn].Add(msg);
-        }
+		public static void SendHighPriorityNetworkMessage(NetworkMessage msg) {
 
-        public static NetworkEntity FindNetworkEntityWithId(NetworkInstanceId id) {
+			objectsManager.pendingMessagesOutboundHP.Add(msg);
+		}
 
-            if (!objectsManager.spawnedEntities.ContainsKey(id)) {
+		public static void SendHighPriorityNetworkMessage(NetworkMessage msg, NetworkConnection conn) {
 
-                throw new EntityNotFoundException();
-            }
+			msg.senderConnection = conn;
+			objectsManager.pendingMessagesOutboundTargetedHP[conn].Add(msg);
+		}
 
-            return objectsManager.spawnedEntities[id];
-        }
+		public static NetworkEntity FindNetworkEntityWithId(NetworkInstanceId id) {
 
-        public static List<NetworkEntity> FindEntitiesFromConnection(NetworkConnection conn) {
+			if (!objectsManager.spawnedEntities.ContainsKey(id)) {
 
-            List<NetworkEntity> entities = new List<NetworkEntity>();
+				throw new EntityNotFoundException();
+			}
 
-            foreach (NetworkEntity entity in objectsManager.spawnedEntities.Values) {
+			return objectsManager.spawnedEntities[id];
+		}
 
-                if (entity.connectionToClient == conn)
-                    entities.Add(entity);
-            }
+		public static List<NetworkEntity> FindEntitiesFromConnection(NetworkConnection conn) {
 
-            return entities;
-        }
+			List<NetworkEntity> entities = new List<NetworkEntity>();
 
-        private class NetworkEventItem {
+			foreach (NetworkEntity entity in objectsManager.spawnedEntities.Values) {
 
-            public int type;
-            public NetworkConnection conn;
-            public NetworkEventPayload payload;
-        }
-    }
+				if (entity.connectionToClient == conn)
+					entities.Add(entity);
+			}
+
+			return entities;
+		}
+
+		private class NetworkEventItem {
+
+			public int type;
+			public NetworkConnection conn;
+			public NetworkEventPayload payload;
+		}
+	}
 }

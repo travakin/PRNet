@@ -9,279 +9,277 @@ using PRNet.Utils;
 using UnityEngine;
 
 namespace PRNet.Core {
-    static class ClientStage {
+	static class ClientStage {
 
-        public static bool active = false;
-        public static int clientId;
+		public static bool active = false;
+		public static int clientId;
 
-        public static int EVENT_CLIENTCONNECTED = 0;
+		public static int EVENT_CLIENTCONNECTED = 0;
 		public static int EVENT_CLIENTDISCONNECTED = 1;
 
-        private static Dictionary<int, List<Action<NetworkEventPayload>>> networkEvents = new Dictionary<int, List<Action<NetworkEventPayload>>>() {
+		private static Dictionary<int, List<Action<NetworkEventPayload>>> networkEvents = new Dictionary<int, List<Action<NetworkEventPayload>>>() {
 
-            { EVENT_CLIENTCONNECTED, new List<Action<NetworkEventPayload>>() },
-            { EVENT_CLIENTDISCONNECTED, new List<Action<NetworkEventPayload>>() }
-        };
+			{ EVENT_CLIENTCONNECTED, new List<Action<NetworkEventPayload>>() },
+			{ EVENT_CLIENTDISCONNECTED, new List<Action<NetworkEventPayload>>() }
+		};
 
-        private static List<SpawnCommand> pendingSpawnRequests = new List<SpawnCommand>();
-        private static List<DestroyCommand> pendingDestroyCommands = new List<DestroyCommand>();
+		private static List<SpawnCommand> pendingSpawnRequests = new List<SpawnCommand>();
+		private static List<DestroyCommand> pendingDestroyCommands = new List<DestroyCommand>();
 
-        private static Queue<NetworkEventItem> networkEventItems = new Queue<NetworkEventItem>();
-        private static NetworkObjectsManager objectsManager = new NetworkObjectsManager();
+		private static Queue<NetworkEventItem> networkEventItems = new Queue<NetworkEventItem>();
+		private static NetworkObjectsManager objectsManager = new NetworkObjectsManager();
 
-        private static PRClient clientObject;
-        private static bool ready = false;
+		private static PRClient clientObject;
+		private static bool ready = false;
 
-        public static void ConnectClient(string ip, int port) {
+		public static void ConnectClient(string ip, int port) {
 
-            Debug.Log("Connecting client");
+			Debug.Log("Connecting client");
 
 			PacketRecorder pr = new PacketRecorder(100, 300000);
-            clientObject = new PRClient(objectsManager, pr, pr, new NetworkMonitor());
-            clientObject.RequestConnection(ip, port);
+			clientObject = new PRClient(objectsManager, pr, pr, new NetworkMonitor());
+			clientObject.RequestConnection(ip, port);
 
-            RpcHandler.Initialize(RegisterMessageEvent);
-            RpcHandler.ObjectRegistryCallback callback = FindNetworkEntityWithId;
-            RpcHandler.SetObjectRegistryCallback(callback);
+			RpcHandler.Initialize(RegisterMessageEvent);
+			RpcHandler.ObjectRegistryCallback callback = FindNetworkEntityWithId;
+			RpcHandler.SetObjectRegistryCallback(callback);
 
-            active = true;
+			active = true;
+		}
 
-            Debug.Log("Client Connected");
-        }
+		public static void ResetClient() {
 
-        public static void ResetClient() {
+			Debug.Log("Resetting client");
+			objectsManager.ResetClient();
+			ready = false;
+		}
 
-            Debug.Log("Resetting client");
-            objectsManager.ResetClient();
-            ready = false;
-        }
+		public static void DisconnectClient() {
 
-        public static void DisconnectClient() {
+			Debug.Log("Disconnecting client");
+			ready = false;
+			active = false;
+			clientObject.DisconnectClient();
+			objectsManager.ResetClient();
+		}
 
-            Debug.Log("Disconnecting client");
-            ready = false;
-            active = false;
-            clientObject.DisconnectClient();
-            objectsManager.ResetClient();
-        }
+		public static void AddEntityDefinitions(EntityDictionaryEntry[] definitions) {
 
-        public static void AddEntityDefinitions(EntityDictionaryEntry[] definitions) {
+			objectsManager.entityDefinitions = definitions;
+		}
 
-            objectsManager.entityDefinitions = definitions;
-        }
+		public static void ParseSpawnCommand(Packet packet) {
 
-        public static void ParseSpawnCommand(Packet packet) {
+			PacketSpawnCommand command = (PacketSpawnCommand)packet;
 
-            PacketSpawnCommand command = (PacketSpawnCommand)packet;
+			if (command.spawnCommand != null)
+				pendingSpawnRequests.Add(command.spawnCommand);
+		}
 
-            if (command.spawnCommand != null)
-                pendingSpawnRequests.Add(command.spawnCommand);
-        }
+		public static void ParseDestroyCommand(Packet packet) {
 
-        public static void ParseDestroyCommand(Packet packet) {
+			PacketDestroyCommand command = (PacketDestroyCommand)packet;
 
-            PacketDestroyCommand command = (PacketDestroyCommand)packet;
+			if (command.destroyCommand != null)
+				pendingDestroyCommands.Add(command.destroyCommand);
+		}
 
-            if (command.destroyCommand != null)
-                pendingDestroyCommands.Add(command.destroyCommand);
-        }
+		public static void ParseNetworkMessages(Packet packet) {
 
-        public static void ParseNetworkMessages(Packet packet) {
+			if (!ready) {
 
-            if (!ready) {
+				return;
+			}
 
-                return;
-            }
+			PacketNetworkMessage messagePacket = (PacketNetworkMessage)packet;
 
-            PacketNetworkMessage messagePacket = (PacketNetworkMessage)packet;
+			foreach (var message in messagePacket.networkMessages) {
 
-            foreach (var message in messagePacket.networkMessages) {
+				objectsManager.pendingMessagesInbound.Push(message);
+			}
+		}
 
-                objectsManager.pendingMessagesInbound.Push(message);
-            }
-        }
+		public static void Tick() {
 
-        public static void Tick() {
+			if (clientObject.state != (int)PRClient.States.Connected)
+				return;
 
-            if (clientObject.state != (int)PRClient.States.Connected)
-                return;
+			SpawnObjects();
+			DestroyObjects();
 
-            SpawnObjects();
-            DestroyObjects();
+			CallNetworkMessageEvents();
+			CallNetworkEvents();
 
-            CallNetworkMessageEvents();
-            CallNetworkEvents();
+			PacketStateRequest request = BuildStateRequest();
+			clientObject.RequestUpdate(request);
+		}
 
-            PacketStateRequest request = BuildStateRequest();
-            clientObject.RequestUpdate(request);
-        }
+		private static void SpawnObjects() {
 
-        private static void SpawnObjects() {
+			List<SpawnCommand> spawnCommands = new List<SpawnCommand>();
+			spawnCommands.AddRange(pendingSpawnRequests);
+			pendingSpawnRequests.RemoveRange(0, pendingSpawnRequests.Count);
 
-            List<SpawnCommand> spawnCommands = new List<SpawnCommand>();
-            spawnCommands.AddRange(pendingSpawnRequests);
-            pendingSpawnRequests.RemoveRange(0, pendingSpawnRequests.Count);
+			foreach (SpawnCommand command in spawnCommands) {
 
-            foreach (SpawnCommand command in spawnCommands) {
+				if (command == null || objectsManager.spawnedEntities.ContainsKey(command.id)) {
 
-                if (command == null || objectsManager.spawnedEntities.ContainsKey(command.id)) {
+					continue;
+				}
 
-                    continue;
-                }
+				NetworkEntity newEntity = objectsManager.entityDefinitions.Where(entity => entity.name == command.name).Single().entity;
 
-                NetworkEntity newEntity = objectsManager.entityDefinitions.Where(entity => entity.name == command.name).Single().entity;
+				NetworkEntity spawnedEntity = GameObject.Instantiate(newEntity, command.position.Value, command.rotation.Value);
+				spawnedEntity.Initialize(command.ownerId, command.id, command.name, command.arguments);
+				spawnedEntity.ReceiveSyncVarUpdate(command.syncVarValues);
 
-                NetworkEntity spawnedEntity = GameObject.Instantiate(newEntity, command.position.Value, command.rotation.Value);
-                spawnedEntity.Initialize(command.ownerId, command.id, command.name, command.arguments);
-                spawnedEntity.ReceiveSyncVarUpdate(command.syncVarValues);
+				objectsManager.spawnedEntities.Add(spawnedEntity.instanceId, spawnedEntity);
+			}
+		}
 
-                objectsManager.spawnedEntities.Add(spawnedEntity.instanceId, spawnedEntity);
-            }
-        }
+		private static void DestroyObjects() {
 
-        private static void DestroyObjects() {
+			List<DestroyCommand> destroyCommands = new List<DestroyCommand>();
+			destroyCommands.AddRange(pendingDestroyCommands);
+			pendingDestroyCommands.RemoveRange(0, pendingDestroyCommands.Count);
 
-            List<DestroyCommand> destroyCommands = new List<DestroyCommand>();
-            destroyCommands.AddRange(pendingDestroyCommands);
-            pendingDestroyCommands.RemoveRange(0, pendingDestroyCommands.Count);
+			foreach (DestroyCommand command in destroyCommands) {
 
-            foreach (DestroyCommand command in destroyCommands) {
+				if (command == null || !objectsManager.spawnedEntities.ContainsKey(command.id)) {
 
-                if (command == null || !objectsManager.spawnedEntities.ContainsKey(command.id)) {
+					continue;
+				}
 
-                    continue;
-                }
+				NetworkEntity toDestroy = objectsManager.spawnedEntities[command.id];
+				toDestroy.OnNetworkDestroy(command.args);
 
-                NetworkEntity toDestroy = objectsManager.spawnedEntities[command.id];
-                toDestroy.OnNetworkDestroy(command.args);
+				objectsManager.spawnedEntities.Remove(command.id);
 
-                objectsManager.spawnedEntities.Remove(command.id);
+				GameObject.Destroy(toDestroy.gameObject);
+			}
+		}
 
-                GameObject.Destroy(toDestroy.gameObject);
-            }
-        }
+		private static void CallNetworkMessageEvents() {
 
-        private static void CallNetworkMessageEvents() {
+			while (objectsManager.pendingMessagesInbound.Count > 0) {
 
-            while (objectsManager.pendingMessagesInbound.Count > 0) {
+				NetworkMessage msg = objectsManager.pendingMessagesInbound.Pop();
 
-                NetworkMessage msg = objectsManager.pendingMessagesInbound.Pop();
+				if (msg == null) {
 
-                if (msg == null) {
+					continue;
+				}
 
-                    continue;
-                }
+				if (objectsManager.messageEvents.ContainsKey(msg.type)) {
 
-                if (objectsManager.messageEvents.ContainsKey(msg.type)) {
+					foreach (var msgEvent in objectsManager.messageEvents[msg.type]) {
 
-                    foreach (var msgEvent in objectsManager.messageEvents[msg.type]) {
+						try {
 
-                        try {
+							msgEvent(msg);
+						}
+						catch (Exception e) {
+						}
+					}
+				}
+			}
+		}
 
-                            msgEvent(msg);
-                        }
-                        catch (Exception e) {
-                        }
-                    }
-                }
-            }
-        }
+		private static void CallNetworkEvents() {
 
-        private static void CallNetworkEvents() {
+			while (networkEventItems.Count > 0) {
 
-            while (networkEventItems.Count > 0) {
+				NetworkEventItem item = networkEventItems.Dequeue();
+				if (item == null)
+					continue;
 
-                NetworkEventItem item = networkEventItems.Dequeue();
-                if (item == null)
-                    continue;
+				foreach (Action<NetworkEventPayload> evt in networkEvents[item.type])
+					evt(item.payload);
+			}
+		}
 
-                foreach (Action<NetworkEventPayload> evt in networkEvents[item.type])
-                    evt(item.payload);
-            }
-        }
+		private static PacketStateRequest BuildStateRequest() {
 
-        private static PacketStateRequest BuildStateRequest() {
+			PacketStateRequest request = new PacketStateRequest();
 
-            PacketStateRequest request = new PacketStateRequest();
+			return request;
+		}
 
-            return request;
-        }
+		public static void RegisterMessageEvent(int eventKey, Action<NetworkMessage> messageEvent) {
 
-        public static void RegisterMessageEvent(int eventKey, Action<NetworkMessage> messageEvent) {
+			if (!objectsManager.messageEvents.ContainsKey(eventKey))
+				objectsManager.messageEvents.Add(eventKey, new List<Action<NetworkMessage>>());
 
-            if (!objectsManager.messageEvents.ContainsKey(eventKey))
-                objectsManager.messageEvents.Add(eventKey, new List<Action<NetworkMessage>>());
+			objectsManager.messageEvents[eventKey].Add(messageEvent);
+		}
 
-            objectsManager.messageEvents[eventKey].Add(messageEvent);
-        }
+		public static void UnRegisterMessageEvent(int eventKey, Action<NetworkMessage> messageEvent) {
 
-        public static void UnRegisterMessageEvent(int eventKey, Action<NetworkMessage> messageEvent) {
+			int first = objectsManager.messageEvents[eventKey].Count;
+			objectsManager.messageEvents[eventKey].Remove(messageEvent);
+			int second = objectsManager.messageEvents[eventKey].Count;
+		}
 
-            int first = objectsManager.messageEvents[eventKey].Count;
-            objectsManager.messageEvents[eventKey].Remove(messageEvent);
-            int second = objectsManager.messageEvents[eventKey].Count;
-        }
+		public static void SubscribeNetworkEvent(int type, Action<NetworkEventPayload> evt) {
 
-        public static void SubscribeNetworkEvent(int type, Action<NetworkEventPayload> evt) {
+			networkEvents[type].Add(evt);
+		}
 
-            networkEvents[type].Add(evt);
-        }
+		public static void EnqueueNetworkEvent(int type, NetworkEventPayload payload) {
 
-        public static void EnqueueNetworkEvent(int type, NetworkEventPayload payload) {
+			NetworkEventItem newItem = new NetworkEventItem();
+			newItem.type = type;
+			newItem.payload = payload;
 
-            NetworkEventItem newItem = new NetworkEventItem();
-            newItem.type = type;
-            newItem.payload = payload;
+			networkEventItems.Enqueue(newItem);
+		}
 
-            networkEventItems.Enqueue(newItem);
-        }
+		public static void SendNetworkMessage(NetworkMessage msg) {
 
-        public static void SendNetworkMessage(NetworkMessage msg) {
+			objectsManager.pendingMessagesOutbound.Add(msg);
+		}
 
-            objectsManager.pendingMessagesOutbound.Add(msg);
-        }
+		public static void SendHighPriorityNetworkMessage(NetworkMessage msg) {
 
-        public static void SendHighPriorityNetworkMessage(NetworkMessage msg) {
+			objectsManager.pendingMessagesOutboundHP.Add(msg);
+		}
 
-            objectsManager.pendingMessagesOutboundHP.Add(msg);
-        }
+		public static NetworkEntity FindNetworkEntityWithId(NetworkInstanceId netId) {
 
-        public static NetworkEntity FindNetworkEntityWithId(NetworkInstanceId netId) {
+			if (!objectsManager.spawnedEntities.ContainsKey(netId)) {
 
-            if (!objectsManager.spawnedEntities.ContainsKey(netId)) {
+				throw new EntityNotFoundException();
+			}
 
-                throw new EntityNotFoundException();
-            }
+			return objectsManager.spawnedEntities[netId];
+		}
 
-            return objectsManager.spawnedEntities[netId];
-        }
+		public static void Ready() {
 
-        public static void Ready() {
+			NetworkEntity[] staticEntities = GameObject.FindObjectsOfType<NetworkEntity>().Where(entity => entity.staticEntity).ToArray();
 
-            NetworkEntity[] staticEntities = GameObject.FindObjectsOfType<NetworkEntity>().Where(entity => entity.staticEntity).ToArray();
+			foreach (NetworkEntity staticEntity in staticEntities) {
 
-            foreach (NetworkEntity staticEntity in staticEntities) {
+				if (objectsManager.spawnedEntities.Values.Contains(staticEntity)) {
 
-                if (objectsManager.spawnedEntities.Values.Contains(staticEntity)) {
+					continue;
+				}
 
-                    continue;
-                }
+				Transform et = staticEntity.transform;
+				staticEntity.instanceId = new NetworkInstanceId((int)(et.position.x * 100) + (int)(et.position.y * 10) + (int)(et.position.z));
+				staticEntity.Ready();
 
-                Transform et = staticEntity.transform;
-                staticEntity.instanceId = new NetworkInstanceId((int)(et.position.x * 100) + (int)(et.position.y * 10) + (int)(et.position.z));
-                staticEntity.Ready();
+				objectsManager.spawnedEntities.Add(staticEntity.instanceId, staticEntity);
+			}
 
-                objectsManager.spawnedEntities.Add(staticEntity.instanceId, staticEntity);
-            }
+			ready = true;
+			clientObject.GetStateFromServer();
+		}
 
-            ready = true;
-            clientObject.GetStateFromServer();
-        }
+		private class NetworkEventItem {
 
-        private class NetworkEventItem {
-
-            public int type;
-            public NetworkEventPayload payload;
-        }
-    }
+			public int type;
+			public NetworkEventPayload payload;
+		}
+	}
 }

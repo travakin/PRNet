@@ -5,256 +5,255 @@ using System.Linq;
 using System.Reflection;
 using PRNet.Core;
 using PRNet.Requests;
+using PRNet.Utils;
 using UnityEngine;
 
 namespace PRNet.NetworkEntities {
-    public class NetworkEntity : MonoBehaviour, IEquatable<NetworkEntity> {
+	public class NetworkEntity : MonoBehaviour, IEquatable<NetworkEntity> {
 
-        public NetworkInstanceId instanceId;
-        public NetworkConnection connectionToClient;
-        public int ownerId = -1;
-        public string definitionName;
-        public bool staticEntity = false;
+		public NetworkInstanceId instanceId;
+		public NetworkConnection connectionToClient;
+		public int ownerId = -1;
+		public string definitionName;
+		public bool staticEntity = false;
 
-        //private Vector3 _position;
-        //private Quaternion _rotation;
-        private NetworkSpawnArgs _args;
+		private NetworkSyncVector3 _position;
+		private NetworkSyncQuaternion _rotation;
+		private NetworkSpawnArgs _args;
 
-        private Dictionary<string, RpcMeta> rpcDictionary = new Dictionary<string, RpcMeta>();
-        private Dictionary<string, SyncVar> syncVarDictionary = new Dictionary<string, SyncVar>();
+		private Dictionary<string, RpcMeta> rpcDictionary = new Dictionary<string, RpcMeta>();
+		private Dictionary<string, SyncVar> syncVarDictionary = new Dictionary<string, SyncVar>();
 
-        private List<Action> readyEvents = new List<Action>();
-        private List<Action<NetworkSpawnArgs>> initializationEvents = new List<Action<NetworkSpawnArgs>>();
-        private List<Action<NetworkDestroyArgs>> destroyEvents = new List<Action<NetworkDestroyArgs>>();
+		private List<Action> readyEvents = new List<Action>();
+		private List<Action<NetworkSpawnArgs>> initializationEvents = new List<Action<NetworkSpawnArgs>>();
+		private List<Action<NetworkDestroyArgs>> destroyEvents = new List<Action<NetworkDestroyArgs>>();
 
-        private void Awake() {
+		private void Awake() {
 
-            //_position = transform.position;
-            //_rotation = transform.rotation;
-        }
+			_position = transform.position.GetSerializableVector();
+			_rotation = transform.rotation.GetSerializableVector();
+		}
 
-        private void Update() {
+		private void Update() {
 
-            //_position = transform.position;
-            //_rotation = transform.rotation;
+			_position = transform.position.GetSerializableVector();
+			_rotation = transform.rotation.GetSerializableVector();
 
-            if (ServerStage.active) {
+			if (ServerStage.active) {
 
-                foreach (SyncVar var in syncVarDictionary.Values) {
+				foreach (SyncVar var in syncVarDictionary.Values) {
 
-                    if (var.IsChanged()) {
+					if (var.IsChanged()) {
 
-                        SendVariableUpdate(var);
-                        var.Equalize();
-                    }
-                }
-            }
-        }
+						SendVariableUpdate(var);
+						var.Equalize();
+					}
+				}
+			}
+		}
 
-        public bool Equals(NetworkEntity other) {
+		public bool Equals(NetworkEntity other) {
 
-            return this.instanceId == other.instanceId;
-        }
+			return this.instanceId == other.instanceId;
+		}
 
-        public void Ready() {
+		public void Ready() {
 
-            readyEvents.ForEach(evt => evt());
-        }
+			readyEvents.ForEach(evt => evt());
+		}
 
-        public void Initialize(int ownerId, NetworkInstanceId id, string definitionName, NetworkSpawnArgs args) {
+		public void Initialize(int ownerId, NetworkInstanceId id, string definitionName, NetworkSpawnArgs args) {
 
-            this.ownerId = ownerId;
-            this.instanceId = id;
-            this.definitionName = definitionName;
-            this._args = args;
+			this.ownerId = ownerId;
+			this.instanceId = id;
+			this.definitionName = definitionName;
+			this._args = args;
 
-            Debug.Log(ownerId);
+			Debug.Log(ownerId);
 
-            StartCoroutine(CallSpawnEvents(args));
-        }
+			StartCoroutine(CallSpawnEvents(args));
+		}
 
-        public void Initialize(int ownerId, NetworkInstanceId id, string definitionName, NetworkConnection conn, NetworkSpawnArgs args) {
+		public void Initialize(int ownerId, NetworkInstanceId id, string definitionName, NetworkConnection conn, NetworkSpawnArgs args) {
 
-            this.ownerId = ownerId;
-            this.instanceId = id;
-            this.definitionName = definitionName;
-            this.connectionToClient = conn;
-            this._args = args;
+			this.ownerId = ownerId;
+			this.instanceId = id;
+			this.definitionName = definitionName;
+			this.connectionToClient = conn;
+			this._args = args;
 
-            Debug.Log(ownerId);
+			Debug.Log(ownerId);
 
-            StartCoroutine(CallSpawnEvents(args));
-        }
+			StartCoroutine(CallSpawnEvents(args));
+		}
 
-        public NetworkSyncVector3 GetPositionSerializable() {
+		public NetworkSyncVector3 GetPositionSerializable() {
 
-            return new NetworkSyncVector3(transform.position);
-        }
+			return new NetworkSyncVector3(transform.position);
+		}
 
-        public NetworkSyncQuaternion GetRotationSerializable() {
+		public NetworkSyncQuaternion GetRotationSerializable() {
 
-            return new NetworkSyncQuaternion(transform.rotation);
-        }
+			return new NetworkSyncQuaternion(transform.rotation);
+		}
 
-        public SpawnCommand GetSpawnRequest() {
+		public SpawnCommand GetSpawnRequest() {
 
-            List<string> varNames = GetSyncVarNames();
-            List<NetworkSyncItem> varValues = GetSyncVarValues(varNames);
+			List<string> varNames = GetSyncVarNames();
+			List<NetworkSyncItem> varValues = GetSyncVarValues(varNames);
 
-            NetworkSyncVarValue values = new NetworkSyncVarValue(varNames, varValues);
+			NetworkSyncVarValue values = new NetworkSyncVarValue(varNames, varValues);
 
-            SpawnCommand spawnCommand = new SpawnCommand(ownerId, instanceId, definitionName, transform.position, transform.rotation, values, _args);
+			SpawnCommand spawnCommand = new SpawnCommand(ownerId, instanceId, definitionName, _position, _rotation, values, _args);
 
-            Debug.Log("" + transform.position + " : " + spawnCommand.position.Value);
+			return spawnCommand;
+		}
 
-            return spawnCommand;
-        }
+		private List<string> GetSyncVarNames() {
 
-        private List<string> GetSyncVarNames() {
+			return syncVarDictionary.Keys.ToList();
+		}
 
-            return syncVarDictionary.Keys.ToList();
-        }
+		private List<NetworkSyncItem> GetSyncVarValues(List<string> names) {
 
-        private List<NetworkSyncItem> GetSyncVarValues(List<string> names) {
+			List<NetworkSyncItem> values = new List<NetworkSyncItem>();
 
-            List<NetworkSyncItem> values = new List<NetworkSyncItem>();
+			names.ForEach(name => values.Add(syncVarDictionary[name].currentItem));
 
-            names.ForEach(name => values.Add(syncVarDictionary[name].currentItem));
+			return values;
+		}
 
-            return values;
-        }
+		public bool IsLocalObject() {
 
-        public bool IsLocalObject() {
+			if (!ClientStage.active)
+				return false;
 
-            if (!ClientStage.active)
-                return false;
+			return this.ownerId == ClientStage.clientId;
+		}
 
-            return this.ownerId == ClientStage.clientId;
-        }
+		public void RegisterRpc(Type type, PRNetworkBehaviour component, string methodName) {
 
-        public void RegisterRpc(Type type, PRNetworkBehaviour component, string methodName) {
+			RpcMeta meta = new RpcMeta();
+			meta.baseType = type;
+			meta.behaviourScript = component;
 
-            RpcMeta meta = new RpcMeta();
-            meta.baseType = type;
-            meta.behaviourScript = component;
+			rpcDictionary.Add(methodName, meta);
+		}
 
-            rpcDictionary.Add(methodName, meta);
-        }
+		public void InvokeRpc(string methodName, RpcArgs args, int priority) {
 
-        public void InvokeRpc(string methodName, RpcArgs args, int priority) {
+			NetworkMessage.RpcInvokeMessage rpcDef = new NetworkMessage.RpcInvokeMessage(instanceId, priority, methodName, args);
 
-            NetworkMessage.RpcInvokeMessage rpcDef = new NetworkMessage.RpcInvokeMessage(instanceId, priority, methodName, args);
+			if (ClientStage.active)
+				ClientStage.SendNetworkMessage(rpcDef);
 
-            if (ClientStage.active)
-                ClientStage.SendNetworkMessage(rpcDef);
+			if (ServerStage.active)
+				ServerStage.SendNetworkMessage(rpcDef);
+		}
 
-            if (ServerStage.active)
-                ServerStage.SendNetworkMessage(rpcDef);
-        }
+		public void InvokeRpc(NetworkConnection conn, string methodName, RpcArgs args, int priority) {
 
-        public void InvokeRpc(NetworkConnection conn, string methodName, RpcArgs args, int priority) {
+			NetworkMessage.RpcInvokeMessage rpcDef = new NetworkMessage.RpcInvokeMessage(instanceId, priority, methodName, args);
 
-            NetworkMessage.RpcInvokeMessage rpcDef = new NetworkMessage.RpcInvokeMessage(instanceId, priority, methodName, args);
+			if (ServerStage.active)
+				ServerStage.SendNetworkMessage(rpcDef, conn);
+		}
 
-            if (ServerStage.active)
-                ServerStage.SendNetworkMessage(rpcDef, conn);
-        }
+		public void ReceiveRpc(string methodName, RpcArgs args) {
 
-        public void ReceiveRpc(string methodName, RpcArgs args) {
+			if (!rpcDictionary.ContainsKey(methodName)) {
 
-            if (!rpcDictionary.ContainsKey(methodName)) {
+				Debug.LogWarning("Rpc function not found.");
+				return;
+			}
 
-                Debug.LogWarning("Rpc function not found.");
-                return;
-            }
+			RpcMeta functionMeta = rpcDictionary[methodName];
 
-            RpcMeta functionMeta = rpcDictionary[methodName];
+			Type[] types = args.types.Select(t => Type.GetType(t)).ToArray();
 
-            Type[] types = args.types.Select(t => Type.GetType(t)).ToArray();
+			MethodInfo method = functionMeta.baseType.GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic, null, types, null);
 
-            MethodInfo method = functionMeta.baseType.GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic, null, types, null);
+			method.Invoke(functionMeta.behaviourScript, args.values);
+		}
 
-            method.Invoke(functionMeta.behaviourScript, args.values);
-        }
+		public void RegisterSyncVar(SyncVar var) {
 
-        public void RegisterSyncVar(SyncVar var) {
+			syncVarDictionary.Add(var.VariableName, var);
+		}
 
-            syncVarDictionary.Add(var.VariableName, var);
-        }
 
+		public void ReceiveSyncVarUpdate(NetworkSyncVarValue values) {
 
-        public void ReceiveSyncVarUpdate(NetworkSyncVarValue values) {
+			StartCoroutine(InitializeSyncVars(values));
+		}
 
-            StartCoroutine(InitializeSyncVars(values));
-        }
+		public void ReceiveSyncVarUpdate(string name, NetworkSyncItem value) {
 
-        public void ReceiveSyncVarUpdate(string name, NetworkSyncItem value) {
+			Debug.Log("Received syncvar update for variable " + name);
+			syncVarDictionary[name].Assign(value);
+		}
 
-            Debug.Log("Received syncvar update for variable " + name);
-            syncVarDictionary[name].Assign(value);
-        }
+		public void RegisterNetworkReadyEvent(Action evt) {
 
-        public void RegisterNetworkReadyEvent(Action evt) {
+			readyEvents.Add(evt);
+		}
 
-            readyEvents.Add(evt);
-        }
+		public void RegisterInitializationEvent(Action<NetworkSpawnArgs> evt) {
 
-        public void RegisterInitializationEvent(Action<NetworkSpawnArgs> evt) {
+			initializationEvents.Add(evt);
+		}
 
-            initializationEvents.Add(evt);
-        }
+		public void SendVariableUpdate(SyncVar var) {
 
-        public void SendVariableUpdate(SyncVar var) {
+			if (!ServerStage.active)
+				return;
 
-            if (!ServerStage.active)
-                return;
+			NetworkMessage.SyncVarUpdateMessage msg = new NetworkMessage.SyncVarUpdateMessage(instanceId, var.VariableName, var.currentItem);
+			ServerStage.SendHighPriorityNetworkMessage(msg);
+		}
 
-            NetworkMessage.SyncVarUpdateMessage msg = new NetworkMessage.SyncVarUpdateMessage(instanceId, var.VariableName, var.currentItem);
-            ServerStage.SendHighPriorityNetworkMessage(msg);
-        }
+		private IEnumerator CallSpawnEvents(NetworkSpawnArgs args) {
 
-        private IEnumerator CallSpawnEvents(NetworkSpawnArgs args) {
+			yield return null;
 
-            yield return null;
+			foreach (var evt in initializationEvents) {
 
-            foreach (var evt in initializationEvents) {
+				evt(args);
+			}
+		}
 
-                evt(args);
-            }
-        }
+		private IEnumerator InitializeSyncVars(NetworkSyncVarValue values) {
 
-        private IEnumerator InitializeSyncVars(NetworkSyncVarValue values) {
+			yield return null;
 
-            yield return null;
+			for (int i = 0; i < values.Names.Count; i++) {
 
-            for (int i = 0; i < values.Names.Count; i++) {
+				string name = values.Names[i];
+				NetworkSyncItem value = values.Value[i];
 
-                string name = values.Names[i];
-                NetworkSyncItem value = values.Value[i];
+				Debug.Log("Received syncvar update for variable " + name);
 
-                Debug.Log("Received syncvar update for variable " + name);
+				syncVarDictionary[name].Assign(value);
+			}
+		}
 
-                syncVarDictionary[name].Assign(value);
-            }
-        }
+		public void RegisterOnDestroyEvent(Action<NetworkDestroyArgs> evt) {
 
-        public void RegisterOnDestroyEvent(Action<NetworkDestroyArgs> evt) {
+			destroyEvents.Add(evt);
+		}
 
-            destroyEvents.Add(evt);
-        }
+		public void OnNetworkDestroy(NetworkDestroyArgs args) {
 
-        public void OnNetworkDestroy(NetworkDestroyArgs args) {
+			foreach (Action<NetworkDestroyArgs> evt in destroyEvents) {
 
-            foreach (Action<NetworkDestroyArgs> evt in destroyEvents) {
+				evt(args);
+			}
+		}
 
-                evt(args);
-            }
-        }
+		private struct RpcMeta {
 
-        private struct RpcMeta {
-
-            public Type baseType;
-            public PRNetworkBehaviour behaviourScript;
-        }
-    }
+			public Type baseType;
+			public PRNetworkBehaviour behaviourScript;
+		}
+	}
 }

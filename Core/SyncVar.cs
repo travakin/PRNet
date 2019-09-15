@@ -63,8 +63,6 @@ namespace PRNet.Core {
 
         public bool IsChanged() {
 
-            Debug.Log("Previous item: " + prevItem.GetValue() + ", Current item: " + currentItem.GetValue() + ", IsChanged: " + !currentItem.Equals(prevItem));
-
             return !currentItem.Equals(prevItem);
         }
     }

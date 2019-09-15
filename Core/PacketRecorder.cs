@@ -3,6 +3,7 @@ using PRNet.Packets;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using UnityEngine;
 
 namespace PRNet.Core {
 
@@ -41,8 +42,14 @@ namespace PRNet.Core {
 		public void Acknowledge(int packetId)
 			=> sentPacketsRecord.RemoveAll(record => record.packet.packetId == packetId);
 
+		public void Acknowledge(int packetId, NetworkConnection conn)
+			=> sentPacketsRecord.RemoveAll(record => record.packet.packetId == packetId && record.conn == conn);
+
 		public void ClearPacketsForConnection(NetworkConnection conn)
 			=> sentPacketsRecord.RemoveAll(record => record.conn == conn);
+
+		public void ClearAllSentPacketRecords()
+			=> sentPacketsRecord.RemoveAll(record => true);
 
 		public void RecordReceivedPacket(Packet packet) {
 

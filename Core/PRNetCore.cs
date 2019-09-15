@@ -15,21 +15,19 @@ using PRNet.Core;
 
 namespace PRNet {
 
-    public class PRNetCore{
+	public class PRNetCore{
 
 		private int nextPacketId = 1;
 
-        protected UdpClient udpClient;
+		protected UdpClient udpClient;
 
 		protected IRecordSentPackets sentPacketRecorder;
 		protected IRecordReceivedPackets receivedPacketRecorder;
 		protected INetworkMonitor monitor;
 
-        protected bool stopThreads = false;
+		protected bool stopThreads = false;
 
 		protected void StampPacket(Packet packet) {
-
-			packet.timeStamp = DateTime.Now;
 
 			if (packet.packetId == 0) {
 
@@ -39,35 +37,38 @@ namespace PRNet {
 		}
 
 		protected void ParseAck(Packet packet)
-			=> receivedPacketRecorder.RecordReceivedPacket(packet);
+			=> sentPacketRecorder.Acknowledge(packet.packetId);
 
-		protected void ParseAck(Packet packet, NetworkConnection conn) 
-			=> receivedPacketRecorder.RecordReceivedPacket(packet, conn);
+		protected void ParseAck(Packet packet, NetworkConnection conn)
+			=> sentPacketRecorder.Acknowledge(packet.packetId, conn);
 
 		protected Packet GetPacketFromSocket(UdpClient socket, ref IPEndPoint clientEndPoint, IAsyncResult result) {
+			
+			Packet readPacket = null;
 
-            Byte[] receivedBytes = new Byte[0];
-            Packet readPacket = null;
+			try {
 
-            try {
+				Byte[] receivedBytes = socket.EndReceive(result, ref clientEndPoint);
+				monitor.AddPacketsInbound(1);
+				monitor.AddBytesInbound(receivedBytes.Length);
 
-                receivedBytes = socket.EndReceive(result, ref clientEndPoint);
-                monitor.AddPacketsInbound(1);
-                monitor.AddBytesInbound(receivedBytes.Length);
-            }
-            catch (SocketException se) {
+				if (receivedBytes.Length < 1)
+					throw new EmptyDatagramException();
 
-                throw new SocketException();
-            }
-            finally {
+				readPacket = Converters.DeserializePacket(receivedBytes);
 
-                if (receivedBytes.Length < 1)
-                    throw new EmptyDatagramException();
+				if (readPacket == null)
+					throw new NullPacketException();
 
-                readPacket = Converters.DeserializePacket(receivedBytes);
-            }
+				if (readPacket.packetId == 0)
+					throw new UnidentifiedPacketException($"PRNet Core Error: Received packet of type {readPacket.type} with an id of 0.");
 
-            return readPacket;
-        }
-    }
+				return readPacket;
+			}
+			catch (SocketException se) {
+
+				throw new SocketException();
+			}
+		}
+	}
 }

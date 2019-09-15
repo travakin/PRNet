@@ -40,14 +40,13 @@ namespace PRNet.Packets {
         public static short PACKET_ACK = 11;
 
         //Header
-        public DateTime timeStamp = DateTime.Now;
 
         [SerializeAbleField(0)]
         public int packetId;
         [SerializeAbleField(1)]
         public short type;
         [SerializeAbleField(2)]
-        public short priority = 0;
+        public short priority;
     }
 
     [Serializable]
@@ -57,6 +56,7 @@ namespace PRNet.Packets {
         public PacketChallengeRequest() {
 
             type = Packet.PACKET_CHALLENGEREQUEST;
+			priority = PRIORITY_HIGH;
         }
     }
 

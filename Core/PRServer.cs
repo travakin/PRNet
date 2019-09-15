@@ -15,438 +15,426 @@ using UnityEngine;
 
 namespace PRNet.Core {
 
-    public class PRServer : PRNetCore {
+	public class PRServer : PRNetCore {
 
-        private const int MAX_NETWORK_MESSAGES_PER_PACKET = 16;
-        private const int SIO_UDP_CONNRESET = -1744830452;
-        private const int MAX_CONNECTIONS = 16;
-        private const int TIMEOUT_SEC = 20;
-        private const int HIGH_PRIORITY_RECORD_LIFESPAN = 3;
-        private const int HIGH_PRIORITY_WAIT_MS = 200;
+		private const int MAX_NETWORK_MESSAGES_PER_PACKET = 16;
+		private const int SIO_UDP_CONNRESET = -1744830452;
+		private const int MAX_CONNECTIONS = 16;
+		private const int TIMEOUT_SEC = 20;
+		private const int HIGH_PRIORITY_RECORD_LIFESPAN = 3;
+		private const int HIGH_PRIORITY_WAIT_MS = 200;
 
-        private NetworkObjectsManager objectsManager;
+		private NetworkObjectsManager objectsManager;
 
 		private NetworkConnection[] clientConnections = new NetworkConnection[MAX_CONNECTIONS];
-        private List<NetworkConnection> pendingConnections = new List<NetworkConnection>();
-        private Action<Packet, NetworkConnection> invokePacketParsers;
+		private List<NetworkConnection> pendingConnections = new List<NetworkConnection>();
+		private Action<Packet, NetworkConnection> invokePacketParsers;
 
-        private DateTime lastPacketCountTime = DateTime.Now;
+		private DateTime lastPacketCountTime = DateTime.Now;
 
-        private Dictionary<int, Action<Packet, NetworkConnection>> parsers = new Dictionary<int, Action<Packet, NetworkConnection>>();
+		private Dictionary<int, Action<Packet, NetworkConnection>> parsers = new Dictionary<int, Action<Packet, NetworkConnection>>();
 
-        public PRServer(int port, NetworkObjectsManager manager, IRecordSentPackets sentPacketRecorder, IRecordReceivedPackets receivedPacketRecorder, INetworkMonitor monitor) {
+		public PRServer(int port, NetworkObjectsManager manager, IRecordSentPackets sentPacketRecorder, IRecordReceivedPackets receivedPacketRecorder, INetworkMonitor monitor) {
 
-            this.objectsManager = manager;
+			this.objectsManager = manager;
 			this.sentPacketRecorder = sentPacketRecorder;
 			this.receivedPacketRecorder = receivedPacketRecorder;
-            this.monitor = monitor;
+			this.monitor = monitor;
 
-            udpClient = new UdpClient(47777);
+			udpClient = new UdpClient(47777);
 
-            udpClient.Client.IOControl(
-                (IOControlCode)SIO_UDP_CONNRESET,
-                new byte[] { 0, 0, 0, 0 },
-                null
-            );
+			udpClient.Client.IOControl(
+				(IOControlCode)SIO_UDP_CONNRESET,
+				new byte[] { 0, 0, 0, 0 },
+				null
+			);
 
-            udpClient.BeginReceive(new AsyncCallback(UdpServerData), udpClient);
+			udpClient.BeginReceive(new AsyncCallback(UdpServerData), udpClient);
 
-            parsers.Add(Packet.PACKET_CONNECTIONREQUEST, ParseConnectionRequestPacket);
-            parsers.Add(Packet.PACKET_CHALLENGERESPONSE, ParseChallengeResponsePacket);
-            parsers.Add(Packet.PACKET_CLIENTREADY, ParseClientReadyPacket);
-            parsers.Add(Packet.PACKET_ACK, ParseAck);
-            parsers.Add(Packet.PACKET_STATEREQUEST, ParseStateRequestPacket);
-            parsers.Add(Packet.PACKET_NETWORKMESSAGE, ServerStage.ParseNetworkMessages);
-            parsers.Add(Packet.PACKET_CLIENTDISCONNECTED, ParseClientDisconnectPacket);
+			parsers.Add(Packet.PACKET_CONNECTIONREQUEST, ParseConnectionRequestPacket);
+			parsers.Add(Packet.PACKET_CHALLENGERESPONSE, ParseChallengeResponsePacket);
+			parsers.Add(Packet.PACKET_CLIENTREADY, ParseClientReadyPacket);
+			parsers.Add(Packet.PACKET_ACK, ParseAck);
+			parsers.Add(Packet.PACKET_STATEREQUEST, ParseStateRequestPacket);
+			parsers.Add(Packet.PACKET_NETWORKMESSAGE, ServerStage.ParseNetworkMessages);
+			parsers.Add(Packet.PACKET_CLIENTDISCONNECTED, ParseClientDisconnectPacket);
 
-            invokePacketParsers = new Action<Packet, NetworkConnection>((readPacket, newConnection) => parsers[readPacket.type](readPacket, newConnection));
+			Thread timeoutDetectionThread = new Thread(new ThreadStart(ChangeDetectionThread));
+			timeoutDetectionThread.Start();
+		}
 
-            Thread timeoutDetectionThread = new Thread(new ThreadStart(ChangeDetectionThread));
-            timeoutDetectionThread.Start();
-        }
+		public void Stop() {
 
-        public void Stop() {
+			stopThreads = true;
 
-            stopThreads = true;
+			if (stopThreads)
+				udpClient.Close();
+		}
 
-            if (stopThreads)
-                udpClient.Close();
-        }
+		private void UdpServerData(IAsyncResult result) {
 
-        private void UdpServerData(IAsyncResult result) {
+			UdpClient socket = result.AsyncState as UdpClient;
 
-            UdpClient socket = result.AsyncState as UdpClient;
+			socket.BeginReceive(new AsyncCallback(UdpServerData), socket);
 
-            socket.BeginReceive(new AsyncCallback(UdpServerData), socket);
+			IPEndPoint clientEndPoint = new IPEndPoint(IPAddress.Any, 0);
 
-            IPEndPoint clientEndPoint = new IPEndPoint(IPAddress.Any, 0);
+			Packet readPacket = GetPacketFromSocket(socket, ref clientEndPoint, result);
 
-            Packet readPacket = GetPacketFromSocket(socket, ref clientEndPoint, result);
+			NetworkConnection newConnection = new NetworkConnection(clientEndPoint, DateTime.Now);
 
-            NetworkConnection newConnection = new NetworkConnection(clientEndPoint, DateTime.Now);
+			int idx = Array.IndexOf(clientConnections, newConnection);
+			if (idx > -1)
+				newConnection = clientConnections[idx];
 
-            int idx = Array.IndexOf(clientConnections, newConnection);
-            if (idx > -1)
-                newConnection = clientConnections[idx];
+			if (!receivedPacketRecorder.HasReceivedPacket(readPacket, newConnection))
+				ProcessPacket(readPacket, newConnection);
 
-            RecordHighPriorityPacket(readPacket, newConnection);
+			if (readPacket.priority == Packet.PRIORITY_HIGH) {
 
-            invokePacketParsers(readPacket, newConnection);
-        }
+				RecordHighPriorityPacket(readPacket, newConnection);
+				AcknowledgePacket(readPacket, newConnection);
+			}
+		}
 
-        private void RecordHighPriorityPacket(Packet readPacket, NetworkConnection newConnection) {
+		public void ProcessPacket(Packet readPacket, NetworkConnection newConnection)
+			=> parsers[readPacket.type](readPacket, newConnection);
 
-            PacketPriorityAck ackPacket = new PacketPriorityAck();
-            ackPacket.responseId = readPacket.packetId;
+		private void AcknowledgePacket(Packet readPacket, NetworkConnection conn) {
 
-            SendPacket(ackPacket, newConnection);
+			PacketPriorityAck ackPacket = new PacketPriorityAck();
+			ackPacket.responseId = readPacket.packetId;
 
-			if (receivedPacketRecorder.HasReceivedPacket(readPacket, newConnection))
-				return;
+			SendPacket(ackPacket, conn);
+		}
 
-			receivedPacketRecorder.RecordReceivedPacket(readPacket, newConnection);
-        }
+		private void RecordHighPriorityPacket(Packet readPacket, NetworkConnection newConnection)
+			=> receivedPacketRecorder.RecordReceivedPacket(readPacket, newConnection);
 
-        private void ChangeDetectionThread() {
+		private void ChangeDetectionThread() {
 
-            while (!stopThreads) {
+			while (!stopThreads) {
 
-                CheckTimeoutConnections();
-                ResendHighPriorityPackets();
-                DeleteExpiredHighPriorityRecords();
-                DisplayData();
-            }
-        }
+				CheckTimeoutConnections();
+				ResendHighPriorityPackets();
+				DeleteExpiredHighPriorityRecords();
+				DisplayData();
+			}
+		}
 
-        private void CheckTimeoutConnections() {
+		private void CheckTimeoutConnections() {
 
-            for (int i = 0; i < clientConnections.Length; i++) {
+			for (int i = 0; i < clientConnections.Length; i++) {
 
-                if (clientConnections[i] == null)
-                    continue;
+				if (clientConnections[i] == null)
+					continue;
 
-                if ((DateTime.Now - clientConnections[i].timestamp).Seconds > TIMEOUT_SEC) {
+				if ((DateTime.Now - clientConnections[i].timestamp).Seconds > TIMEOUT_SEC) {
 
-                    NetworkEventPayload.ServerClientDisconnectPayload payload = new NetworkEventPayload.ServerClientDisconnectPayload();
+					NetworkEventPayload.ServerClientDisconnectPayload payload = new NetworkEventPayload.ServerClientDisconnectPayload();
 
-                    ServerStage.EnqueueNetworkEvent(ServerStage.EVENT_CLIENTDISCONNECTED, clientConnections[i], payload);
+					ServerStage.EnqueueNetworkEvent(ServerStage.EVENT_CLIENTDISCONNECTED, clientConnections[i], payload);
 
-                    objectsManager.pendingMessagesOutboundTargeted.Remove(clientConnections[i]);
-                    objectsManager.pendingMessagesOutboundTargetedHP.Remove(clientConnections[i]);
-                    clientConnections[i] = null;
+					objectsManager.pendingMessagesOutboundTargeted.Remove(clientConnections[i]);
+					objectsManager.pendingMessagesOutboundTargetedHP.Remove(clientConnections[i]);
+					clientConnections[i] = null;
 
 					sentPacketRecorder.ClearPacketsForConnection(clientConnections[i]);
-                }
-            }
-        }
+				}
+			}
+		}
 
-        private void ResendHighPriorityPackets() {
+		private void ResendHighPriorityPackets() {
 
-			List <PacketConnection> expiredPackets = sentPacketRecorder.RetrieveExpiredSentPackets();
+			List<PacketConnection> expiredPackets = sentPacketRecorder.RetrieveExpiredSentPackets();
 
-            foreach (PacketConnection record in expiredPackets) {
+			foreach (PacketConnection record in expiredPackets) {
 
 				SendPacket(record.packet, record.conn);
-            }
-        }
+			}
+		}
 
-        private void DeleteExpiredHighPriorityRecords() 
+		private void DeleteExpiredHighPriorityRecords()
 			=> receivedPacketRecorder.ClearExpiredReceivedPacketRecords();
 
-        private void DisplayData() {
+		private void DisplayData() {
 
-            if ((DateTime.Now - lastPacketCountTime).TotalSeconds > 1) {
+			if ((DateTime.Now - lastPacketCountTime).TotalSeconds > 1) {
 
-                //Debug.Log("Current inbound packets: " + monitor.GetPacketsInbound() + " packets for a total of " + monitor.GetBytesInbound() + " bytes");
-                //Debug.Log("Current outbound packets: " + monitor.GetPacketsOutbound() + " packets for a total of " + monitor.GetBytesOutbound() + " bytes");
+				//Debug.Log("Current inbound packets: " + monitor.GetPacketsInbound() + " packets for a total of " + monitor.GetBytesInbound() + " bytes");
+				//Debug.Log("Current outbound packets: " + monitor.GetPacketsOutbound() + " packets for a total of " + monitor.GetBytesOutbound() + " bytes");
 
-                monitor.ClearData();
-                lastPacketCountTime = DateTime.Now;
-            }
-        }
+				monitor.ClearData();
+				lastPacketCountTime = DateTime.Now;
+			}
+		}
 
-        private void ParseConnectionRequestPacket(Packet packet, NetworkConnection clientConnection) {
+		private void ParseConnectionRequestPacket(Packet packet, NetworkConnection clientConnection) {
 
-            if (Array.IndexOf(clientConnections, clientConnection) > -1 || pendingConnections.Contains(clientConnection))
-                return;
+			if (Array.IndexOf(clientConnections, clientConnection) > -1 || pendingConnections.Contains(clientConnection))
+				return;
 
-            pendingConnections.Add(clientConnection);
+			pendingConnections.Add(clientConnection);
 
-            PacketChallengeRequest packetChallengeRequest = new PacketChallengeRequest();
+			PacketChallengeRequest packetChallengeRequest = new PacketChallengeRequest();
 
-            SendPacket(packetChallengeRequest, clientConnection);
-        }
+			SendPacket(packetChallengeRequest, clientConnection);
+		}
 
-        private void ParseChallengeResponsePacket(Packet packet, NetworkConnection clientConnection) {
+		private void ParseChallengeResponsePacket(Packet packet, NetworkConnection clientConnection) {
 
-            PacketChallengeResponse response = (PacketChallengeResponse)packet;
+			PacketChallengeResponse response = (PacketChallengeResponse)packet;
 
-            if (Array.IndexOf(clientConnections, clientConnection) > -1)
-                return;
+			if (Array.IndexOf(clientConnections, clientConnection) > -1)
+				return;
 
-            if (!pendingConnections.Contains(clientConnection)) {
+			if (!pendingConnections.Contains(clientConnection))
+				return;
 
-                return;
-            }
+			AddConnectionToSlot(clientConnection, GetEmptyServerSlotIndex());
 
-            if (!(Array.IndexOf(clientConnections, clientConnection) > -1)) {
+			SendConnectionConfirmation(clientConnection);
 
+			NetworkEventPayload.ServerClientConnectPayload payload = CreateConnectedEventFromChallengeResponse(response);
+			ServerStage.EnqueueNetworkEvent(ServerStage.EVENT_CLIENTCONNECTED, clientConnection, payload);
+		}
 
-                int slotIndex = GetEmptyServerSlotIndex();
+		private void AddConnectionToSlot(NetworkConnection clientConnection, int slotIndex) {
 
-                if (slotIndex != -1) {
+			if (!(Array.IndexOf(clientConnections, clientConnection) > -1)) {
 
-                    clientConnection.clientId = slotIndex;
-                    clientConnections[slotIndex] = clientConnection;
+				if (slotIndex != -1) {
 
-                    objectsManager.pendingMessagesOutboundTargeted.Add(clientConnection, new List<NetworkMessage>());
-                    objectsManager.pendingMessagesOutboundTargetedHP.Add(clientConnection, new List<NetworkMessage>());
-                }
-                else {
-                }
-            }
+					clientConnection.clientId = slotIndex;
+					clientConnections[slotIndex] = clientConnection;
 
-            PacketConnectionConfirm confimation = new PacketConnectionConfirm(clientConnection.clientId);
-            confimation.levelName = ServerData.CurrentLevelName;
+					objectsManager.pendingMessagesOutboundTargeted.Add(clientConnection, new List<NetworkMessage>());
+					objectsManager.pendingMessagesOutboundTargetedHP.Add(clientConnection, new List<NetworkMessage>());
+				}
+			}
+		}
 
-            SendPacket(confimation, clientConnection);
+		private void SendConnectionConfirmation(NetworkConnection clientConnection) {
 
-            NetworkEventPayload.ServerClientConnectPayload payload = new NetworkEventPayload.ServerClientConnectPayload();
-            payload.username = response.username;
-            payload.playerName = response.playerName;
-            payload.playerAccountBalance = response.playerAccountBalance;
+			PacketConnectionConfirm confimation = new PacketConnectionConfirm(clientConnection.clientId);
+			confimation.levelName = ServerData.CurrentLevelName;
 
-            ServerStage.EnqueueNetworkEvent(ServerStage.EVENT_CLIENTCONNECTED, clientConnection, payload);
-        }
+			SendPacket(confimation, clientConnection);
+		}
 
-        private int GetEmptyServerSlotIndex() {
+		private NetworkEventPayload.ServerClientConnectPayload CreateConnectedEventFromChallengeResponse(PacketChallengeResponse response)
 
-            int ret = -1;
+			=> new NetworkEventPayload.ServerClientConnectPayload {
+				username = response.username,
+				playerName = response.playerName,
+				playerAccountBalance = response.playerAccountBalance
+			};
 
-            for (int i = 0; i < clientConnections.Length; i++) {
+		private int GetEmptyServerSlotIndex() {
 
-                if (clientConnections[i] == null) {
+			for (int i = 0; i < clientConnections.Length; i++) {
 
-                    ret = i;
-                    break;
-                }
-            }
+				if (clientConnections[i] == null)
+					return i;
+			}
 
-            return ret;
-        }
+			return -1;
+		}
 
-        private void ParseClientReadyPacket(Packet packet, NetworkConnection clientConnection) {
+		private void ParseClientReadyPacket(Packet packet, NetworkConnection clientConnection) {
 
-            ServerStage.ClientInitializationUpdate(clientConnection);
+			ServerStage.ClientInitializationUpdate(clientConnection);
 
-            NetworkEventPayload.ServerClientReadyPayload payload = new NetworkEventPayload.ServerClientReadyPayload();
-            ServerStage.EnqueueNetworkEvent(ServerStage.EVENT_CLIENTREADY, clientConnection, payload);
-        }
+			NetworkEventPayload.ServerClientReadyPayload payload = new NetworkEventPayload.ServerClientReadyPayload();
+			ServerStage.EnqueueNetworkEvent(ServerStage.EVENT_CLIENTREADY, clientConnection, payload);
+		}
 
-        private void ParseStateRequestPacket(Packet packet, NetworkConnection clientConnection) {
+		private void ParseStateRequestPacket(Packet packet, NetworkConnection clientConnection) {
 
-            int idx = Array.IndexOf(clientConnections, clientConnection);
+			int idx = Array.IndexOf(clientConnections, clientConnection);
 
-            if (!(idx > -1)) 
-                return;
-            else 
-                clientConnection = clientConnections[idx];
+			if (!(idx > -1))
+				return;
+			else
+				clientConnection = clientConnections[idx];
 
-            clientConnection.timestamp = DateTime.Now;
-            clientConnection.ping = (int)(DateTime.Now - packet.timeStamp).TotalMilliseconds * 2;
+			clientConnection.timestamp = DateTime.Now;
 
-            PacketStateRequest parsePacket = (PacketStateRequest)packet;
-        }
+			PacketStateRequest parsePacket = (PacketStateRequest)packet;
+		}
 
-        private void ParseClientDisconnectPacket(Packet packet, NetworkConnection clientConnection) {
+		private void ParseClientDisconnectPacket(Packet packet, NetworkConnection clientConnection) {
 
-            ServerStage.EnqueueNetworkEvent(ServerStage.EVENT_CLIENTDISCONNECTED, clientConnection, new NetworkEventPayload.ServerClientDisconnectPayload());
+			ServerStage.EnqueueNetworkEvent(ServerStage.EVENT_CLIENTDISCONNECTED, clientConnection, new NetworkEventPayload.ServerClientDisconnectPayload());
 
-            for (int i = 0; i < clientConnections.Length; i++) {
+			for (int i = 0; i < clientConnections.Length; i++) {
 
-                if (clientConnections[i] == clientConnection) {
+				if (clientConnections[i] == clientConnection) {
 
-                    objectsManager.pendingMessagesOutboundTargeted.Remove(clientConnections[i]);
-                    objectsManager.pendingMessagesOutboundTargetedHP.Remove(clientConnections[i]);
+					objectsManager.pendingMessagesOutboundTargeted.Remove(clientConnections[i]);
+					objectsManager.pendingMessagesOutboundTargetedHP.Remove(clientConnections[i]);
 
-                    clientConnections[i] = null;
-                    break;
-                }
-            }
-        }
+					clientConnections[i] = null;
+					break;
+				}
+			}
+		}
 
-        public void SendClientUpdates(Packet packet) {
+		public void SendClientUpdates(Packet packet) {
 
-            SendPacket(packet);
-        }
+			SendPacket(packet);
+		}
 
-        public void SendClientUpdates(Packet packet, NetworkConnection target) {
+		public void SendClientUpdates(Packet packet, NetworkConnection target) {
 
-            SendPacket(packet, target);
-        }
+			SendPacket(packet, target);
+		}
 
-        public void SendNetworkMessages() {
+		public void SendNetworkMessages() {
 
-            List<NetworkMessage> messages = objectsManager.pendingMessagesOutbound.GetRange(0, objectsManager.pendingMessagesOutbound.Count);
-            objectsManager.pendingMessagesOutbound.RemoveRange(0, objectsManager.pendingMessagesOutbound.Count);
+			List<NetworkMessage> messages = objectsManager.pendingMessagesOutbound.GetRange(0, objectsManager.pendingMessagesOutbound.Count);
+			objectsManager.pendingMessagesOutbound.RemoveRange(0, objectsManager.pendingMessagesOutbound.Count);
 
-            List<NetworkMessage> messagesHP = objectsManager.pendingMessagesOutboundHP.GetRange(0, objectsManager.pendingMessagesOutboundHP.Count);
-            objectsManager.pendingMessagesOutboundHP.RemoveRange(0, objectsManager.pendingMessagesOutboundHP.Count);
+			List<NetworkMessage> messagesHP = objectsManager.pendingMessagesOutboundHP.GetRange(0, objectsManager.pendingMessagesOutboundHP.Count);
+			objectsManager.pendingMessagesOutboundHP.RemoveRange(0, objectsManager.pendingMessagesOutboundHP.Count);
 
-            SendUntargeted(messages, false);
-            SendUntargeted(messagesHP, true);
+			SendUntargeted(messages, false);
+			SendUntargeted(messagesHP, true);
 
-            for (int i = 0; i < clientConnections.Length; i++) {
+			for (int i = 0; i < clientConnections.Length; i++) {
 
-                if (clientConnections[i] == null)
-                    continue;
+				if (clientConnections[i] == null)
+					continue;
 
-                SendNetworkMessages(clientConnections[i]);
-            }
-        }
+				SendNetworkMessages(clientConnections[i]);
+			}
+		}
 
-        private void SendNetworkMessages(NetworkConnection currentConnection) {
+		private void SendNetworkMessages(NetworkConnection currentConnection) {
 
-            List<NetworkMessage> targetMessages = objectsManager.pendingMessagesOutboundTargeted[currentConnection].GetRange(0, objectsManager.pendingMessagesOutboundTargeted[currentConnection].Count);
-            objectsManager.pendingMessagesOutboundTargeted[currentConnection].RemoveRange(0, objectsManager.pendingMessagesOutboundTargeted[currentConnection].Count);
+			List<NetworkMessage> targetMessages = objectsManager.pendingMessagesOutboundTargeted[currentConnection].GetRange(0, objectsManager.pendingMessagesOutboundTargeted[currentConnection].Count);
+			objectsManager.pendingMessagesOutboundTargeted[currentConnection].RemoveRange(0, objectsManager.pendingMessagesOutboundTargeted[currentConnection].Count);
 
-            List<NetworkMessage> targetMessagesHP = objectsManager.pendingMessagesOutboundTargetedHP[currentConnection].GetRange(0, objectsManager.pendingMessagesOutboundTargetedHP[currentConnection].Count);
-            objectsManager.pendingMessagesOutboundTargetedHP[currentConnection].RemoveRange(0, objectsManager.pendingMessagesOutboundTargetedHP[currentConnection].Count);
+			List<NetworkMessage> targetMessagesHP = objectsManager.pendingMessagesOutboundTargetedHP[currentConnection].GetRange(0, objectsManager.pendingMessagesOutboundTargetedHP[currentConnection].Count);
+			objectsManager.pendingMessagesOutboundTargetedHP[currentConnection].RemoveRange(0, objectsManager.pendingMessagesOutboundTargetedHP[currentConnection].Count);
 
-            SendTargeted(targetMessages, currentConnection, false);
-            SendTargeted(targetMessagesHP, currentConnection, true);
-        }
+			SendTargeted(targetMessages, currentConnection, false);
+			SendTargeted(targetMessagesHP, currentConnection, true);
+		}
 
-        private void SendUntargeted(List<NetworkMessage> msgList, bool useHighPriority) {
+		private void SendUntargeted(List<NetworkMessage> msgList, bool useHighPriority) {
 
-            if (msgList.Count < 1)
-                return;
+			if (msgList.Count < 1)
+				return;
 
-            int numberOfPackets = msgList.Count / MAX_NETWORK_MESSAGES_PER_PACKET + 1;
+			int numberOfPackets = msgList.Count / MAX_NETWORK_MESSAGES_PER_PACKET + 1;
 
-            for (int i = 0; i < numberOfPackets; i++) {
+			for (int i = 0; i < numberOfPackets; i++) {
 
-                PacketNetworkMessage msgPacket;
+				PacketNetworkMessage msgPacket;
 
-                if (useHighPriority)
-                    msgPacket = new PacketNetworkMessage(Packet.PRIORITY_HIGH);
-                else
-                    msgPacket = new PacketNetworkMessage(Packet.PRIORITY_LOW);
+				if (useHighPriority)
+					msgPacket = new PacketNetworkMessage(Packet.PRIORITY_HIGH);
+				else
+					msgPacket = new PacketNetworkMessage(Packet.PRIORITY_LOW);
 
-                int messageCount = (msgList.Count < MAX_NETWORK_MESSAGES_PER_PACKET) ? msgList.Count : MAX_NETWORK_MESSAGES_PER_PACKET;
+				int messageCount = (msgList.Count < MAX_NETWORK_MESSAGES_PER_PACKET) ? msgList.Count : MAX_NETWORK_MESSAGES_PER_PACKET;
 
-                List<NetworkMessage> toSend = msgList.GetRange(0, messageCount);
-                msgList.RemoveRange(0, messageCount);//This may fuck things up
+				List<NetworkMessage> toSend = msgList.GetRange(0, messageCount);
+				msgList.RemoveRange(0, messageCount);//This may fuck things up
 
-                foreach (NetworkMessage msg in toSend) {
+				foreach (NetworkMessage msg in toSend) {
 
-                    msgPacket.networkMessages.Add(msg);
-                }
+					msgPacket.networkMessages.Add(msg);
+				}
 
-                if (msgPacket.networkMessages.Count > 0)
-                    SendPacket(msgPacket);
-            }
-        }
+				if (msgPacket.networkMessages.Count > 0)
+					SendPacket(msgPacket);
+			}
+		}
 
-        private void SendTargeted(List<NetworkMessage> msgList, NetworkConnection conn, bool useHighPriority) {
+		private void SendTargeted(List<NetworkMessage> msgList, NetworkConnection conn, bool useHighPriority) {
 
-            if (msgList.Count < 1)
-                return;
+			if (msgList.Count < 1)
+				return;
 
-            int numberOfPackets = msgList.Count / MAX_NETWORK_MESSAGES_PER_PACKET + 1;
+			int numberOfPackets = msgList.Count / MAX_NETWORK_MESSAGES_PER_PACKET + 1;
 
-            for (int i = 0; i < numberOfPackets; i++) {
+			for (int i = 0; i < numberOfPackets; i++) {
 
-                PacketNetworkMessage msgPacket;
+				PacketNetworkMessage msgPacket;
 
-                if (useHighPriority)
-                    msgPacket = new PacketNetworkMessage(Packet.PRIORITY_HIGH);
-                else
-                    msgPacket = new PacketNetworkMessage(Packet.PRIORITY_LOW);
+				if (useHighPriority)
+					msgPacket = new PacketNetworkMessage(Packet.PRIORITY_HIGH);
+				else
+					msgPacket = new PacketNetworkMessage(Packet.PRIORITY_LOW);
 
-                int messageCount = (msgList.Count < MAX_NETWORK_MESSAGES_PER_PACKET) ? msgList.Count : MAX_NETWORK_MESSAGES_PER_PACKET;
+				int messageCount = (msgList.Count < MAX_NETWORK_MESSAGES_PER_PACKET) ? msgList.Count : MAX_NETWORK_MESSAGES_PER_PACKET;
 
-                List<NetworkMessage> toSend = msgList.GetRange(0, messageCount);
-                msgList.RemoveRange(0, messageCount);//This may fuck things up
+				List<NetworkMessage> toSend = msgList.GetRange(0, messageCount);
+				msgList.RemoveRange(0, messageCount);//This may fuck things up
 
-                foreach (NetworkMessage msg in toSend) {
+				foreach (NetworkMessage msg in toSend) {
 
-                    msgPacket.networkMessages.Add(msg);
-                }
+					msgPacket.networkMessages.Add(msg);
+				}
 
-                if (msgPacket.networkMessages.Count > 0)
-                    SendPacket(msgPacket, conn);
-            }
-        }
+				if (msgPacket.networkMessages.Count > 0)
+					SendPacket(msgPacket, conn);
+			}
+		}
 
-        public async void SendPacket(Packet packet) {
+		public void SendPacket(Packet packet) {
 
-            CachePacket(packet, null);
+			for (int i = 0; i < clientConnections.Length; i++) {
 
-            byte[] sendData = Converters.SerializePacket(packet);
+				if (clientConnections[i] == null)
+					continue;
 
-            for (int i = 0; i < clientConnections.Length; i++) {
+				SendPacket(packet, clientConnections[i]);
+			}
+		}
 
-                if (clientConnections[i] == null)
-                    continue;
-
-                if (sendData.Length > 1500) {
-                }
-
-                try {
-
-                    await udpClient.SendAsync(sendData, sendData.Length, clientConnections[i].endPoint);
-                    monitor.AddPacketsOutbound(1);
-                    monitor.AddBytesOutbound(sendData.Length);
-                }
-                catch (SocketException se) {
-                }
-            }
-        }
-
-        public async void SendPacket(Packet packet, NetworkConnection connection) {
+		public async void SendPacket(Packet packet, NetworkConnection connection) {
 
 			StampPacket(packet);
-            CachePacket(packet, connection);
+			CachePacket(packet, connection);
 
-            byte[] sendData = Converters.SerializePacket(packet);
+			byte[] sendData = Converters.SerializePacket(packet);
 
-            if (sendData.Length > 1500) {
-            }
+			try {
 
-            try {
+				await udpClient.SendAsync(sendData, sendData.Length, connection.endPoint);
 
-                monitor.AddPacketsOutbound(1);
-                monitor.AddBytesOutbound(sendData.Length);
-                await udpClient.SendAsync(sendData, sendData.Length, connection.endPoint);
-            }
-            catch (SocketException se) {
+				monitor.AddPacketsOutbound(1);
+				monitor.AddBytesOutbound(sendData.Length);
+			}
+			catch (SocketException se) {
 
-                Debug.LogError("Unable to send packet: " + se.Message);
-                Debug.LogError("Client info: " + connection.endPoint.ToString());
-            }
+				Debug.LogError("Unable to send packet: " + se.Message);
+				Debug.LogError("Client info: " + connection.endPoint.ToString());
+			}
+		}
 
-        }
+		private void CachePacket(Packet packet, NetworkConnection connection) {
 
-        private void CachePacket(Packet packet, NetworkConnection connection) {
-
-            if (packet.priority == Packet.PRIORITY_HIGH) {
+			if (packet.priority == Packet.PRIORITY_HIGH) {
 
 				sentPacketRecorder.RecordSentPacket(packet, connection);
-            }
-        }
+			}
+		}
 
-        public int ClientCount() {
+		public int ClientCount() {
 
-            int count = 0;
+			int count = 0;
 
-            for (int i = 0; i < clientConnections.Length; i++) {
+			for (int i = 0; i < clientConnections.Length; i++) {
 
-                if (clientConnections[i] != null)
-                    count++;
-            }
+				if (clientConnections[i] != null)
+					count++;
+			}
 
-            return count;
-        }
-    }
+			return count;
+		}
+	}
 }
